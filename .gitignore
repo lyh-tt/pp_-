@@ -1,0 +1,10 @@
+.venv/
+.venv-win/
+.pytest_cache/
+__pycache__/
+build/
+dist/
+*_TexGen_*/
+.pp-texgen-*/
+.pp-fiber-*/
+

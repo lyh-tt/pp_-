@@ -1,0 +1,565 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from math import isfinite
+from pathlib import Path
+from string import Template
+from tempfile import TemporaryDirectory
+
+from .fiber_bundle import FiberBundleRow
+from .fiber_rve import _natural_group_key
+from .resources import package_resource
+
+FAIL_MARKERS = (
+    "THE ANALYSIS HAS NOT BEEN COMPLETED",
+    "TIME INCREMENT REQUIRED IS LESS THAN THE MINIMUM SPECIFIED",
+    "TOO MANY ATTEMPTS MADE FOR THIS INCREMENT",
+    "ABAQUS/STANDARD ANALYSIS EXITED WITH AN ERROR",
+    "ABAQUS ERROR",
+)
+SUCCESS_MARKERS = (
+    "THE ANALYSIS HAS COMPLETED SUCCESSFULLY",
+    "THE ANALYSIS HAS BEEN COMPLETED",
+)
+
+
+@dataclass(frozen=True)
+class TexGenModel:
+    name: str
+    inp_path: Path
+    ori_path: Path
+    eld_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class SolveConfig:
+    abaqus_command: str
+    cpus: int = 2
+    max_parallel: int = 2
+    retries: int = 1
+    resume_existing: bool = True
+    scratch_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not self.abaqus_command.strip():
+            raise ValueError("请填写 Abaqus 命令或路径。")
+        if self.cpus < 1:
+            raise ValueError("CPUs 须大于等于 1。")
+        if self.max_parallel < 1:
+            raise ValueError("并行任务数须大于等于 1。")
+        if self.retries < 0:
+            raise ValueError("失败重试次数不能小于 0。")
+
+
+@dataclass(frozen=True)
+class AbaqusTask:
+    model: TexGenModel
+    row: FiberBundleRow
+    job_name: str
+    output_rpt: Path
+
+
+@dataclass(frozen=True)
+class TaskResult:
+    task: AbaqusTask
+    status: str  # "succeeded" | "skipped" | "failed" | "cancelled"
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class BatchSummary:
+    total: int
+    succeeded: int
+    skipped: int
+    failed: int
+    cancelled: int
+    results: tuple[TaskResult, ...]
+
+
+def detect_abaqus_command() -> str:
+    for name in ("abq2026", "abq2024", "abq2022", "abaqus"):
+        located = shutil.which(name)
+        if located:
+            return located
+
+    search_roots = (Path("D:/abaqus"), Path("D:/ABAQUS"), Path("C:/SIMULIA"), Path("D:/SIMULIA"))
+    candidates: list[Path] = []
+    for root in search_roots:
+        if root.is_dir():
+            candidates.extend(root.glob("**/abq*.bat"))
+            candidates.extend(root.glob("**/abaqus.bat"))
+    if candidates:
+        candidates.sort(key=lambda p: _natural_group_key(str(p)), reverse=True)
+        return str(candidates[0])
+    return ""
+
+
+def _inspect_model_dir(folder: Path, model_name: str) -> TexGenModel | None:
+    inps = sorted(folder.glob("*.inp"), key=lambda p: _natural_group_key(p.name))
+    oris = sorted(folder.glob("*.ori"), key=lambda p: _natural_group_key(p.name))
+    if not inps or not oris:
+        return None
+    elds = sorted(folder.glob("*.eld"), key=lambda p: _natural_group_key(p.name))
+    return TexGenModel(
+        name=model_name,
+        inp_path=inps[0].resolve(),
+        ori_path=oris[0].resolve(),
+        eld_path=elds[0].resolve() if elds else None,
+    )
+
+
+def discover_texgen_models(root_dir: Path) -> list[TexGenModel]:
+    root = Path(root_dir).resolve()
+    if not root.is_dir():
+        return []
+
+    direct = _inspect_model_dir(root, root.name)
+    if direct is not None:
+        return [direct]
+
+    models: list[TexGenModel] = []
+    subdirs = sorted(
+        (entry for entry in root.iterdir() if entry.is_dir() and not entry.name.startswith(".")),
+        key=lambda entry: _natural_group_key(entry.name),
+    )
+    for sub in subdirs:
+        found = _inspect_model_dir(sub, sub.name)
+        if found is not None:
+            models.append(found)
+            continue
+        for child in sub.iterdir():
+            if child.is_dir() and child.name.lower() == "texgen":
+                nested = _inspect_model_dir(child, sub.name)
+                if nested is not None:
+                    models.append(nested)
+                    break
+    return models
+
+
+def _replace_aux_tokens(line: str, aux_map: dict[str, str]) -> str:
+    result = line
+    for old_name, new_name in aux_map.items():
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9_\-.])" + re.escape(old_name) + r"(?![A-Za-z0-9_\-.])"
+        )
+        result = pattern.sub(new_name, result)
+    return result
+
+
+def _skip_data_lines(lines: list[str], index: int) -> int:
+    while index < len(lines) and not lines[index].lstrip().startswith("*"):
+        index += 1
+    return index
+
+
+def patch_texgen_inp(
+    template_inp: Path,
+    output_inp: Path,
+    row: FiberBundleRow,
+    aux_map: dict[str, str],
+) -> None:
+    lines = Path(template_inp).read_text(encoding="utf-8", errors="ignore").splitlines(True)
+    out: list[str] = []
+    current_mat = ""
+    replaced = {
+        "mat0_elastic": False,
+        "mat0_expansion": False,
+        "mat1_elastic": False,
+        "mat1_expansion": False,
+    }
+
+    e_pa = row.e_mpa * 1e6
+    cte_resin = row.cte_e5 * 1e-5
+    elastic_vals = (
+        row.e1 * 1e6,
+        row.e2 * 1e6,
+        row.e3 * 1e6,
+        row.v12,
+        row.v13,
+        row.v23,
+        row.g12 * 1e6,
+        row.g13 * 1e6,
+        row.g23 * 1e6,
+    )
+
+    idx = 0
+    while idx < len(lines):
+        line = _replace_aux_tokens(lines[idx], aux_map)
+        stripped = line.strip().lower()
+        compact = stripped.replace(" ", "")
+
+        if compact.startswith("*material") and "name=" in compact:
+            match = re.search(r"name=([^,\s]+)", compact)
+            current_mat = match.group(1) if match else ""
+
+        if stripped.startswith("*elastic") and "type=engineeringconstants" in compact:
+            out.append(line)
+            out.append(
+                f" {elastic_vals[0]:.6E}, {elastic_vals[1]:.6E}, {elastic_vals[2]:.6E}, "
+                f"{elastic_vals[3]:.6E}, {elastic_vals[4]:.6E}, {elastic_vals[5]:.6E}, "
+                f"{elastic_vals[6]:.6E}, {elastic_vals[7]:.6E}\n"
+            )
+            out.append(f" {elastic_vals[8]:.6E}\n")
+            idx = _skip_data_lines(lines, idx + 1)
+            replaced["mat1_elastic"] = True
+            continue
+
+        if stripped.startswith("*elastic") and "type=" not in compact and current_mat in ("", "mat0"):
+            out.append(line)
+            out.append(f" {e_pa:.6E}, {row.poisson:g}\n")
+            idx = _skip_data_lines(lines, idx + 1)
+            replaced["mat0_elastic"] = True
+            continue
+
+        if stripped.startswith("*expansion") and "type=ortho" in compact:
+            out.append(line)
+            out.append(f" {row.cte_x:.6E}, {row.cte_y:.6E}, {row.cte_z:.6E}\n")
+            idx = _skip_data_lines(lines, idx + 1)
+            replaced["mat1_expansion"] = True
+            continue
+
+        if stripped.startswith("*expansion") and "type=" not in compact and current_mat in ("", "mat0"):
+            out.append(line)
+            out.append(f" {cte_resin:.6E}\n")
+            idx = _skip_data_lines(lines, idx + 1)
+            replaced["mat0_expansion"] = True
+            continue
+
+        out.append(line)
+        idx += 1
+
+    missing = [key for key, done in replaced.items() if not done]
+    if missing:
+        raise ValueError(
+            f"INP 模板缺少所需材料卡片（{', '.join(missing)}）：{Path(template_inp).name}"
+        )
+
+    Path(output_inp).write_text("".join(out), encoding="utf-8", newline="\n")
+
+
+def plan_abaqus_tasks(
+    models: list[TexGenModel],
+    rows: list[FiberBundleRow],
+    output_dir: Path,
+) -> list[AbaqusTask]:
+    if not models:
+        raise ValueError("请选择至少一个 TexGen 几何模型。")
+    if not rows:
+        raise ValueError("纤维束 CSV 中没有有效的材料行。")
+
+    out_root = Path(output_dir).resolve()
+    tasks: list[AbaqusTask] = []
+    for model in models:
+        used_stems: dict[str, int] = {}
+        for row in rows:
+            stem = row.rpt_stem()
+            seen = used_stems.get(stem, 0) + 1
+            used_stems[stem] = seen
+            job_name = stem if seen == 1 else f"{stem}_{seen}"
+            tasks.append(
+                AbaqusTask(
+                    model=model,
+                    row=row,
+                    job_name=job_name,
+                    output_rpt=out_root / model.name / f"{job_name}.rpt",
+                )
+            )
+    return tasks
+
+
+def _count_inp_steps(inp_path: Path) -> int:
+    text = inp_path.read_text(encoding="utf-8", errors="ignore")
+    return len(re.findall(r"^\s*\*Step\b", text, flags=re.IGNORECASE | re.MULTILINE))
+
+
+def _check_abaqus_success(work_dir: Path, job_name: str, expected_steps: int) -> tuple[bool, str]:
+    texts: list[str] = []
+    for ext in (".sta", ".msg", ".dat", ".log"):
+        path = work_dir / f"{job_name}{ext}"
+        if path.is_file():
+            texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+    upper = "\n".join(texts).upper()
+
+    for marker in FAIL_MARKERS:
+        if marker in upper:
+            return False, f"Abaqus 报错：{marker}"
+    if not any(marker in upper for marker in SUCCESS_MARKERS):
+        return False, "未在求解日志中检测到完成标志"
+
+    sta_path = work_dir / f"{job_name}.sta"
+    max_step = 0
+    if sta_path.is_file():
+        for line in sta_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            match = re.match(r"^\s*(\d+)\s+\d+\s+", line)
+            if match:
+                max_step = max(max_step, int(match.group(1)))
+    if max_step < expected_steps:
+        return False, f"求解 Step 数不足（实际 {max_step}，期望 {expected_steps}）"
+
+    odb_path = work_dir / f"{job_name}.odb"
+    if not odb_path.is_file() or odb_path.stat().st_size == 0:
+        return False, "未生成有效的 .odb 文件"
+    return True, ""
+
+
+def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_cancellable_command(
+    cmd: list[str],
+    cwd: Path,
+    log_path: Path,
+    cancel_event: threading.Event | None,
+) -> tuple[int, bool]:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    full_cmd = (
+        ["cmd", "/c", *cmd]
+        if (os.name == "nt" and cmd[0].lower().endswith((".bat", ".cmd")))
+        else cmd
+    )
+    with log_path.open("w", encoding="utf-8", errors="ignore") as out:
+        proc = subprocess.Popen(
+            full_cmd,
+            cwd=str(cwd),
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            creationflags=flags,
+        )
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                return rc, False
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_process_tree(proc)
+                return -1, True
+            time.sleep(0.25)
+
+
+def run_single_task(
+    task: AbaqusTask,
+    config: SolveConfig,
+    *,
+    post_template: Template | None = None,
+    cancel_event: threading.Event | None = None,
+    on_log: Callable[[str], None] | None = None,
+) -> TaskResult:
+    label = f"{task.model.name}/{task.job_name}"
+    if cancel_event is not None and cancel_event.is_set():
+        return TaskResult(task, "cancelled", "已取消")
+
+    if config.resume_existing and task.output_rpt.is_file() and task.output_rpt.stat().st_size > 0:
+        if on_log is not None:
+            on_log(f"[跳过] {label}（已有 RPT 结果）")
+        return TaskResult(task, "skipped", "已有 RPT")
+
+    tpl = post_template or Template(
+        package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+    )
+    last_error = "未知错误"
+
+    for attempt in range(1, config.retries + 2):
+        if cancel_event is not None and cancel_event.is_set():
+            return TaskResult(task, "cancelled", "已取消")
+        if on_log is not None:
+            on_log(f"[求解 {attempt}/{config.retries + 1}] {label}")
+
+        try:
+            with TemporaryDirectory(prefix="abq-work-") as tmp:
+                work_dir = Path(tmp)
+                aux_map: dict[str, str] = {}
+                shutil.copy2(task.model.ori_path, work_dir / f"{task.job_name}.ori")
+                aux_map[task.model.ori_path.name] = f"{task.job_name}.ori"
+                if task.model.eld_path is not None:
+                    shutil.copy2(task.model.eld_path, work_dir / f"{task.job_name}.eld")
+                    aux_map[task.model.eld_path.name] = f"{task.job_name}.eld"
+
+                inp_path = work_dir / f"{task.job_name}.inp"
+                patch_texgen_inp(task.model.inp_path, inp_path, task.row, aux_map)
+                expected_steps = _count_inp_steps(inp_path)
+
+                scratch_root = (
+                    Path(config.scratch_dir).resolve()
+                    if config.scratch_dir is not None
+                    else (work_dir / "scratch")
+                )
+                task_scratch = scratch_root / f"{task.job_name}_{threading.get_ident()}"
+                task_scratch.mkdir(parents=True, exist_ok=True)
+                try:
+                    solve_cmd = [
+                        config.abaqus_command,
+                        f"job={task.job_name}",
+                        f"input={task.job_name}.inp",
+                        f"cpus={config.cpus}",
+                        f"scratch={task_scratch}",
+                        "ask_delete=OFF",
+                        "interactive",
+                    ]
+                    rc, cancelled = _run_cancellable_command(
+                        solve_cmd, work_dir, work_dir / "solve.log", cancel_event
+                    )
+                    if cancelled:
+                        return TaskResult(task, "cancelled", "已取消")
+                    if rc != 0:
+                        last_error = f"Abaqus 退出码异常（{rc}）"
+                        continue
+
+                    ok, reason = _check_abaqus_success(work_dir, task.job_name, expected_steps)
+                    if not ok:
+                        last_error = reason
+                        continue
+
+                    post_script = work_dir / "extract_rpt.py"
+                    post_script.write_text(
+                        tpl.substitute(model_name=repr(task.job_name)),
+                        encoding="utf-8",
+                    )
+                    rc_post, cancelled = _run_cancellable_command(
+                        [config.abaqus_command, "cae", "noGUI=extract_rpt.py"],
+                        work_dir,
+                        work_dir / "post.log",
+                        cancel_event,
+                    )
+                    if cancelled:
+                        return TaskResult(task, "cancelled", "已取消")
+
+                    rpt_tmp = work_dir / f"{task.job_name}.rpt"
+                    if rc_post != 0 or not rpt_tmp.is_file() or rpt_tmp.stat().st_size == 0:
+                        last_error = f"RPT 提取失败（退出码 {rc_post}）"
+                        continue
+
+                    rpt_text = rpt_tmp.read_text(encoding="utf-8", errors="ignore")
+                    if "Effective material properties" not in rpt_text or "CTE_1" not in rpt_text:
+                        last_error = "RPT 缺少等效材料性能字段"
+                        continue
+
+                    task.output_rpt.parent.mkdir(parents=True, exist_ok=True)
+                    with TemporaryDirectory(
+                        dir=task.output_rpt.parent, prefix=".rpt-"
+                    ) as stage_dir:
+                        staged = Path(stage_dir) / task.output_rpt.name
+                        shutil.copy2(rpt_tmp, staged)
+                        staged.replace(task.output_rpt)
+
+                    if on_log is not None:
+                        on_log(f"[完成] {label}")
+                    return TaskResult(task, "succeeded", str(task.output_rpt))
+                finally:
+                    if config.scratch_dir is not None and task_scratch.exists():
+                        shutil.rmtree(task_scratch, ignore_errors=True)
+        except Exception as error:
+            last_error = str(error)
+
+    if on_log is not None:
+        on_log(f"[失败] {label}：{last_error}")
+    return TaskResult(task, "failed", last_error)
+
+
+def run_abaqus_batch(
+    tasks: list[AbaqusTask],
+    config: SolveConfig,
+    *,
+    on_progress: Callable[[int, int, TaskResult], None] | None = None,
+    on_log: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> BatchSummary:
+    if not tasks:
+        raise ValueError("没有待执行的求解任务。")
+
+    post_template = Template(
+        package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+    )
+    total = len(tasks)
+    results: list[TaskResult] = []
+    counts = {"succeeded": 0, "skipped": 0, "failed": 0, "cancelled": 0}
+
+    with ThreadPoolExecutor(max_workers=config.max_parallel) as pool:
+        future_map = {
+            pool.submit(
+                run_single_task,
+                task,
+                config,
+                post_template=post_template,
+                cancel_event=cancel_event,
+                on_log=on_log,
+            ): task
+            for task in tasks
+        }
+        completed = 0
+        for future in as_completed(future_map):
+            result = future.result()
+            results.append(result)
+            counts[result.status] += 1
+            completed += 1
+            if on_progress is not None:
+                on_progress(completed, total, result)
+
+    return BatchSummary(
+        total=total,
+        succeeded=counts["succeeded"],
+        skipped=counts["skipped"],
+        failed=counts["failed"],
+        cancelled=counts["cancelled"],
+        results=tuple(results),
+    )
+
+
+def export_standalone_runner(
+    output_script: Path,
+    *,
+    models_dir: Path,
+    fiber_csv: Path,
+    output_dir: Path,
+    config: SolveConfig,
+    default_poisson: float = 0.38,
+) -> Path:
+    if not isfinite(default_poisson) or not (-1.0 < default_poisson < 0.5):
+        raise ValueError("默认树脂泊松比须介于 -1 和 0.5 之间。")
+
+    post_tpl_text = package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+    runner_tpl = Template(
+        package_resource("abaqus_runner.py.tpl").read_text(encoding="utf-8")
+    )
+    script = runner_tpl.substitute(
+        models_dir=repr(str(Path(models_dir).resolve())),
+        fiber_csv=repr(str(Path(fiber_csv).resolve())),
+        output_dir=repr(str(Path(output_dir).resolve())),
+        abaqus_command=repr(config.abaqus_command.strip()),
+        cpus=config.cpus,
+        max_parallel=config.max_parallel,
+        retries=config.retries,
+        resume_existing=repr(config.resume_existing),
+        default_poisson=repr(default_poisson),
+        scratch_dir=repr(str(config.scratch_dir.resolve()) if config.scratch_dir else ""),
+        post_template=repr(post_tpl_text),
+    )
+    target = Path(output_script).resolve()
+    compile(script, target.name, "exec")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=target.parent, prefix=".pp-runner-") as stage_dir:
+        staged = Path(stage_dir) / target.name
+        staged.write_text(script, encoding="utf-8", newline="\n")
+        staged.replace(target)
+    return target

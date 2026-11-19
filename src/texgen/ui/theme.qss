@@ -212,7 +212,7 @@ QLabel#Weft {
     background-color: #fbefe5;
 }
 
-QLineEdit, QPushButton, QComboBox {
+QLineEdit, QPushButton, QComboBox, QSpinBox {
     background-color: #ffffff;
     border: 1px solid #cbd9e8;
     border-radius: 6px;
@@ -224,13 +224,28 @@ QLineEdit:read-only {
     background-color: #f6f9fc;
 }
 
-QPushButton:hover, QComboBox:hover {
+QPushButton:hover, QComboBox:hover, QSpinBox:hover {
     background-color: #eef5fd;
     border-color: #9bb6d4;
 }
 
-QLineEdit:focus, QPushButton:focus, QComboBox:focus {
+QLineEdit:focus, QPushButton:focus, QComboBox:focus, QSpinBox:focus {
     border-color: #367acc;
+}
+
+QProgressBar {
+    background-color: #eef3f9;
+    border: 1px solid #d5e0ec;
+    border-radius: 6px;
+    text-align: center;
+    color: #172f4b;
+    font-weight: 600;
+    min-height: 18px;
+}
+
+QProgressBar::chunk {
+    background-color: #235fb2;
+    border-radius: 5px;
 }
 
 QPushButton:disabled {

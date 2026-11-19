@@ -60,6 +60,37 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         if not texgen_generated:
             raise RuntimeError(f"TexGen generation self-check failed: {texgen_page.notice.text()}")
 
+        # Step 3 self-check: combine resin_inputs.csv with sample Mechanical_constants.txt.
+        window.select_module("fiber_csv_export")
+        bundle_page = window.page("fiber_csv_export")
+        first_fiber_dir = fiber_page.last_results[0].output_dir
+        (first_fiber_dir / "Mechanical_constants.txt").write_text(
+            "\n".join(
+                "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5"
+                for _ in sample_resins
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        bundle_page.load_result_dir(first_fiber_dir)
+        bundle_csv = bundle_page.generate()
+        bundle_generated = bundle_csv is not None and bundle_csv.is_file()
+        if not bundle_generated:
+            raise RuntimeError(f"Fiber bundle CSV self-check failed: {bundle_page.notice.text()}")
+
+        # Step 4 self-check: load a TexGen model + bundle CSV and export standalone runner.
+        window.select_module("abaqus_batch")
+        abaqus_page = window.page("abaqus_batch")
+        model_dir = texgen_page.script.parent / "PP1080_83p5"
+        (model_dir / "1.inp").write_text("*Heading\n", encoding="utf-8")
+        (model_dir / "1.ori").write_text("", encoding="utf-8")
+        abaqus_page.load_models_dir(texgen_page.script.parent)
+        abaqus_page.load_fiber_csv(bundle_csv)
+        if not abaqus_page.abaqus_edit.text().strip():
+            abaqus_page.abaqus_edit.setText("abaqus")
+        runner_path = abaqus_page.export_script_to(tmp_root / "run_abaqus_batch.py")
+        abaqus_runner_exported = runner_path.is_file()
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "frozen": is_frozen(),
@@ -68,6 +99,8 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         "sample_csv_count": len(sample_resins),
         "fiber_generated": fiber_generated,
         "texgen_generated": texgen_generated,
+        "bundle_generated": bundle_generated,
+        "abaqus_runner_exported": abaqus_runner_exported,
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     window.close()

@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 
+from .abaqus_page import AbaqusBatchPage
+from .bundle_page import FiberBundlePage
 from .fiber_page import FiberRvePage
 from .texgen_page import TexGenPage
 from .widgets import card_layout, label
@@ -123,31 +125,36 @@ def create_default_registry(default_output: Path | None = None) -> ToolRegistry:
         )
     )
 
-    placeholders = (
-        (
-            "fiber_csv_export",
-            "3. 纤维束 CSV 生成",
-            "读取 Fiber RVE 计算结果 Mechanical_constants.txt，生成纤维束等效性能 CSV",
-            "本步骤承接第 1 步（Fiber 微观建模）Abaqus 求解完成的 Mechanical_constants.txt，"
-            "与第 1 步导出的树脂输入顺序一一对应，汇总整理为后续细观 Abaqus 计算所需的纤维束等效性能 CSV。",
-        ),
-        (
-            "abaqus_batch",
-            "4. Abaqus 批量求解",
-            "结合 TexGen INP 几何、同种树脂性能与纤维束等效 CSV 批量提交求解",
-            "本步骤读取第 2 步（TexGen 细观建模）导出的各厚度 INP / ORI / ELD 几何模型，"
-            "结合同一种树脂性能与第 3 步生成的纤维束等效性能 CSV 替换材料卡片后，自动批量执行 Abaqus 均质化求解。",
-        ),
-        (
+    registry.register(
+        ToolModule(
+            module_id="fiber_csv_export",
+            title="3. 纤维束 CSV 生成",
+            subtitle="读取 Mechanical_constants.txt 合并树脂输入，输出单份纤维束等效性能 CSV",
+            category="",
+            implemented=True,
+            factory=lambda: FiberBundlePage(default_output),
+        )
+    )
+
+    registry.register(
+        ToolModule(
+            module_id="abaqus_batch",
+            title="4. Abaqus 批量求解",
+            subtitle="替换 TexGen INP 树脂与纤维束参数，临时目录并发求解并只保留 RPT",
+            category="",
+            implemented=True,
+            factory=lambda: AbaqusBatchPage(default_output),
+        )
+    )
+
+    registry.register(
+        _placeholder_module(
             "rpt_post",
             "5. RPT 后处理",
             "提取介电层均质化等效力学与 CTE 结果并汇总导出 CSV",
             "本步骤用于批量解析第 4 步输出的各厚度、各树脂工况 RPT 均质化结果，"
             "导出可用于宏观翘曲仿真子程序或 AI 数据集的结构化汇总表。",
-        ),
+        )
     )
-
-    for module_id, title, subtitle, description in placeholders:
-        registry.register(_placeholder_module(module_id, title, subtitle, description))
 
     return registry

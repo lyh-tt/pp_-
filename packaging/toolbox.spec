@@ -5,6 +5,8 @@ PROJECT_ROOT = Path(SPECPATH).resolve().parent
 
 datas = [
     (str(PROJECT_ROOT / "src" / "texgen" / "batch.py.tpl"), "texgen"),
+    (str(PROJECT_ROOT / "src" / "texgen" / "rve_post.py.tpl"), "texgen"),
+    (str(PROJECT_ROOT / "src" / "texgen" / "abaqus_runner.py.tpl"), "texgen"),
     (str(PROJECT_ROOT / "src" / "texgen" / "ui" / "theme.qss"), "texgen/ui"),
     (str(PROJECT_ROOT / "templates" / "fiber"), "templates/fiber"),
     (str(PROJECT_ROOT / "examples" / "resin_inputs_example.csv"), "examples"),

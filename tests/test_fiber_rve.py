@@ -345,6 +345,8 @@ def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:
             "sample_csv_count": 2,
             "fiber_generated": True,
             "texgen_generated": True,
+            "bundle_generated": True,
+            "abaqus_runner_exported": True,
         }
     finally:
         window.close()

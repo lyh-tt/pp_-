@@ -75,11 +75,15 @@ if "cae" in args:
     if nogui == "extract_fiber.py":
         e11_text = Path("job-E11/job-E11.odb").read_text(encoding="utf-8")
         nrows = int(re.search(r"NROWS=(\d+)", e11_text).group(1))
-        out_lines = [
-            "5.68e+04\t2.83e+04\t2.83e+04\t0.216\t0.216\t0.278\t1.43e+04\t1.43e+04\t1.39e+04\t4.42e-06\t9.46e-06\t9.46e-06"
-            for _ in range(nrows)
+        resin_rows = ast.literal_eval(re.search(r"^RESIN_ROWS\s*=\s*(.+)$", script_text, re.M).group(1))
+        output_csv = ast.literal_eval(re.search(r"^OUTPUT_CSV\s*=\s*(.+)$", script_text, re.M).group(1))
+        assert len(resin_rows) == nrows
+        headers = "Resin Name,E1MPa,CTE/e-5,Poisson,E1,E2,E3,V12,V13,V23,G12,G13,G23,CTE_X,CTE_Y,CTE_Z"
+        out_lines = [headers] + [
+            f"{{name}},{{e_val}},{{cte_val}},{{nu_val}},5.68e+04,2.83e+04,2.83e+04,0.216,0.216,0.278,1.43e+04,1.43e+04,1.39e+04,4.42e-06,9.46e-06,9.46e-06"
+            for (name, e_val, cte_val, nu_val) in resin_rows
         ]
-        Path("Mechanical_constants.txt").write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        Path(output_csv).write_text("\n".join(out_lines) + "\n", encoding="utf-8-sig")
     else:
         match = re.search(r"MODEL_NAME\s*=\s*(['\"])(.+?)\1", script_text)
         model_name = match.group(2)
@@ -190,14 +194,16 @@ def test_step1_parallel_fiber_solver_zero_residue_and_chinese_output(
     assert len(ticks) == 7
     assert ticks[-1][:2] == (7, 7)
 
-    case_dir = summary.results[0].output_dir
-    produced = sorted(p.name for p in case_dir.iterdir())
-    assert produced == sorted([
-        "Mechanical_constants.txt",
-        f"{case_dir.name}_fiber_bundle.csv",
-        "resin_inputs.csv",
-    ])
-    rows = read_fiber_bundle_csv(case_dir / f"{case_dir.name}_fiber_bundle.csv")
+    res = summary.results[0]
+    expected_name = f"fiber_5um_batch_{resin_count}_fiber_bundle.csv"
+    assert res.output_dir == out_parent.resolve()
+    assert res.bundle_csv_path == (out_parent / expected_name).resolve()
+    produced = sorted(p.relative_to(out_parent).as_posix() for p in out_parent.rglob("*") if p.is_file())
+    assert produced == [expected_name]
+    assert [p for p in out_parent.iterdir() if p.is_dir()] == []
+    assert not (out_parent / "Mechanical_constants.txt").exists()
+
+    rows = read_fiber_bundle_csv(res.bundle_csv_path)
     assert len(rows) == resin_count
     assert rows[0].resin_name == "S8NE"
 
@@ -224,7 +230,7 @@ def test_step1_standalone_fiber_runner_execution(tmp_path: Path) -> None:
         text=True,
     )
     assert proc.returncode == 0, proc.stderr + proc.stdout
-    assert (case_dir / "Mechanical_constants.txt").is_file()
+    assert not (case_dir / "Mechanical_constants.txt").exists()
     bundle_csv = case_dir / f"{case_dir.name}_fiber_bundle.csv"
     assert bundle_csv.is_file()
     assert len(read_fiber_bundle_csv(bundle_csv)) == 1

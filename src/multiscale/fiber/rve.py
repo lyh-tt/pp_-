@@ -469,10 +469,12 @@ def _plan_output_name(
     return f"{prefix}_{suffix}"
 
 
-def plan_fiber_output_dirs(
+def _plan_output_targets(
     templates: list[FiberTemplate],
     output_parent: Path,
     batch_name: str = "",
+    *,
+    suffix: str = "",
 ) -> list[tuple[FiberTemplate, Path]]:
     if not templates:
         raise ValueError("请至少勾选一个 Fiber RVE 模板。")
@@ -491,23 +493,43 @@ def plan_fiber_output_dirs(
     for template in templates:
         if not _is_valid_template_dir(template.path):
             raise FileNotFoundError(f"模板目录缺少必要文件或不存在：{template.path}")
-        dir_name = _plan_output_name(
+        target_name = _plan_output_name(
             template,
             group_multi_selected=group_counts[template.group] > 1,
             batch_name=clean_batch,
             timestamp=timestamp,
-        )
-        key = dir_name.casefold()
+        ) + suffix
+        key = target_name.casefold()
         if key in seen_targets:
-            raise ValueError(f"生成目录名称重复：{dir_name}")
+            raise ValueError(f"生成目标名称重复：{target_name}")
         seen_targets.add(key)
-        destination = parent / dir_name
+        destination = parent / target_name
         if destination.exists():
+            kind = "文件" if suffix else "目录"
             raise ValueError(
-                f"目标目录已存在：{destination.name}。请更换批次名称或留空按时间自动命名。"
+                f"目标{kind}已存在：{destination.name}。请更换批次名称或留空按时间自动命名。"
             )
         planned.append((template, destination))
     return planned
+
+
+def plan_fiber_output_dirs(
+    templates: list[FiberTemplate],
+    output_parent: Path,
+    batch_name: str = "",
+) -> list[tuple[FiberTemplate, Path]]:
+    return _plan_output_targets(templates, output_parent, batch_name, suffix="")
+
+
+def plan_fiber_output_csvs(
+    templates: list[FiberTemplate],
+    output_parent: Path,
+    batch_name: str = "",
+) -> list[tuple[FiberTemplate, Path]]:
+    """直接规划各模板输出的单一纤维束 CSV 文件路径（落在 output_parent 下，无多余子目录）。"""
+    return _plan_output_targets(
+        templates, output_parent, batch_name, suffix="_fiber_bundle.csv"
+    )
 
 
 def stage_fiber_case_files(

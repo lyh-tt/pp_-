@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -30,7 +29,6 @@ from multiscale.fiber.bundle import (
     read_mechanical_constants,
 )
 from multiscale.fiber.rve import ResinProperty, write_sample_resin_csv
-from multiscale.ui.pages.bundle_dialog import FiberBundleDialog
 from multiscale.ui.pages.meso_page import MesoSolvePage
 from multiscale.ui.window import ToolboxWindow
 
@@ -257,38 +255,26 @@ def test_step4_discovery_inp_patching_and_zero_residue_batch(tmp_path: Path) -> 
 
 def test_step3_and_step4_ui_offscreen(tmp_path: Path) -> None:
     app = _qt_app()
-    settings = QSettings()
-    tracked_keys = ("bundle_result_dir",)
-    saved_state = {
-        key: (settings.contains(key), settings.value(key, "", type=str))
-        for key in tracked_keys
-    }
     window = ToolboxWindow(default_output=tmp_path)
     try:
-        # Step 1 bundle dialog: load Fiber RVE result dir and generate single CSV.
-        fiber_dir = tmp_path / "01_fiber" / "fiber_5um_demo"
-        fiber_dir.mkdir(parents=True)
-        write_sample_resin_csv(fiber_dir / "resin_inputs.csv")
-        (fiber_dir / "Mechanical_constants.txt").write_text(
-            "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5\n"
-            "56000 26400 26500 0.23 0.23 0.42 11000 11100 13000 4e-6 1.1e-5 1.2e-5\n",
-            encoding="utf-8",
+        # Simulate direct CSV output produced by Step 1 in 01_fiber/
+        bundle_rows = [
+            FiberBundleRow(
+                "S8NE", 4604.51, 6.04967, 0.36,
+                57000.0, 27400.0, 27500.0, 0.24, 0.24, 0.41,
+                12000.0, 12100.0, 14000.0, 5e-6, 1.2e-5, 1.3e-5,
+            ),
+            FiberBundleRow(
+                "H350", 4030.56, 5.27133, 0.40,
+                56000.0, 26400.0, 26500.0, 0.23, 0.23, 0.42,
+                11000.0, 11100.0, 13000.0, 4e-6, 1.1e-5, 1.2e-5,
+            ),
+        ]
+        csv_out = export_fiber_bundle_csv(
+            bundle_rows, tmp_path / "01_fiber" / "fiber_5um_demo_fiber_bundle.csv"
         )
-
-        bundle_dlg = FiberBundleDialog(window.workspace.layout.fiber_dir, window.page("fiber_rve"))
-        try:
-            bundle_dlg.load_result_dir(fiber_dir)
-            assert bundle_dlg.preview_table.rowCount() == 2
-            assert "已匹配 2 组" in bundle_dlg.summary_badge.text()
-
-            csv_out = bundle_dlg.generate()
-            assert csv_out is not None and csv_out.is_file()
-        finally:
-            bundle_dlg.close()
-            bundle_dlg.deleteLater()
-
-        # Notify upstream fiber CSV ready, then prepare TexGen models dir and verify Step 3 UI.
         window.workspace.notify_fiber_csv(csv_out)
+
         texgen_dir = tmp_path / "02_texgen" / "PP1080_batch"
         model_dir = texgen_dir / "PP1080_80"
         model_dir.mkdir(parents=True)
@@ -307,11 +293,6 @@ def test_step3_and_step4_ui_offscreen(tmp_path: Path) -> None:
         assert runner.is_file()
         assert "abq2026" in runner.read_text(encoding="utf-8")
     finally:
-        for key, (had_key, old_val) in saved_state.items():
-            if had_key:
-                settings.setValue(key, old_val)
-            else:
-                settings.remove(key)
         window.close()
         window.deleteLater()
         app.processEvents()

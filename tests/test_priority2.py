@@ -14,7 +14,6 @@ from multiscale.common.workspace import (
     find_latest_texgen_batch_dir,
 )
 from multiscale.fiber.bundle import FiberBundleRow, export_fiber_bundle_csv
-from multiscale.fiber.rve import ResinProperty, write_sample_resin_csv
 from multiscale.texgen import presets as preset_mod
 from multiscale.texgen.geometry import PlainWeave
 from multiscale.texgen.presets import (
@@ -24,7 +23,6 @@ from multiscale.texgen.presets import (
     load_user_presets,
     save_user_preset,
 )
-from multiscale.ui.pages.bundle_dialog import FiberBundleDialog
 from multiscale.ui.pages.fiber_page import FiberRvePage
 from multiscale.ui.pages.meso_page import MesoSolvePage
 from multiscale.ui.pages.texgen_editor import GeometryEditor
@@ -216,23 +214,22 @@ def test_unified_project_dir_switching_and_3step_linkage(
             proj_a / "effective_properties_summary.csv"
         ).resolve()
 
-        # Step 1: bundle dialog output notifies Step 3 CSV (Tab 0 & Tab 1).
-        fiber_demo = proj_a / "01_fiber" / "fiber_5um_demo"
-        fiber_demo.mkdir(parents=True)
-        write_sample_resin_csv(fiber_demo / "resin_inputs.csv")
-        (fiber_demo / "Mechanical_constants.txt").write_text(
-            "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5\n"
-            "56000 26400 26500 0.23 0.23 0.42 11000 11100 13000 4e-6 1.1e-5 1.2e-5\n",
-            encoding="utf-8",
+        # Step 1: direct bundle CSV in 01_fiber notifies Step 3 CSV (Tab 0 & Tab 1).
+        step1_rows = [
+            FiberBundleRow(
+                "S8NE", 4604.51, 6.04967, 0.38,
+                57000.0, 27400.0, 27500.0, 0.24, 0.24, 0.41,
+                12000.0, 12100.0, 14000.0, 5e-6, 1.2e-5, 1.3e-5,
+            ),
+            FiberBundleRow(
+                "H350", 4030.56, 5.27133, 0.38,
+                56000.0, 26400.0, 26500.0, 0.23, 0.23, 0.42,
+                11000.0, 11100.0, 13000.0, 4e-6, 1.1e-5, 1.2e-5,
+            ),
+        ]
+        bundle_csv = export_fiber_bundle_csv(
+            step1_rows, proj_a / "01_fiber" / "fiber_5um_demo_fiber_bundle.csv"
         )
-        dlg = FiberBundleDialog(window.workspace.layout.fiber_dir, fiber_page)
-        try:
-            dlg.load_result_dir(fiber_demo)
-            bundle_csv = dlg.generate()
-            assert bundle_csv is not None and bundle_csv.is_file()
-        finally:
-            dlg.close()
-            dlg.deleteLater()
         window.workspace.notify_fiber_csv(bundle_csv)
         assert Path(meso_page.csv_path_edit.text()) == bundle_csv.resolve()
         assert Path(meso_page.rpt_csv_edit.text()) == bundle_csv.resolve()

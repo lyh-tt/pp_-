@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
-"""统一从 7 个 Fiber 方向 ODB 中提取等效性能，写入 12 列 Mechanical_constants.txt。"""
+"""统一从 7 个 Fiber 方向 ODB 中提取等效性能，并直接合并树脂参数写出 16 列纤维束 CSV。"""
 from __future__ import print_function
+
+import csv
+import sys
 
 from abaqusConstants import NODAL
 from odbAccess import openOdb
@@ -8,7 +11,14 @@ import numpy as np
 
 CELL_SIZE_MM = $cell_size_mm
 ODB_MAP = $odb_map
-OUTPUT_TXT = $output_txt
+RESIN_ROWS = $resin_rows
+OUTPUT_CSV = $output_csv
+
+BUNDLE_HEADERS = (
+    "Resin Name", "E1MPa", "CTE/e-5", "Poisson",
+    "E1", "E2", "E3", "V12", "V13", "V23",
+    "G12", "G13", "G23", "CTE_X", "CTE_Y", "CTE_Z",
+)
 
 
 def _sum_rf(frame, nset, axis):
@@ -105,6 +115,45 @@ def _extract_cte(odb_path, data, L, H, W, delta_t):
         odb.close()
 
 
+def _csv_cell(val):
+    if sys.version_info[0] < 3:
+        try:
+            unicode_type = unicode
+        except NameError:
+            return str(val)
+        if isinstance(val, unicode_type):
+            return val.encode("utf-8")
+    return str(val)
+
+
+def _write_bundle_csv(output_csv, resin_rows, data):
+    """兼容 Abaqus Python 2/3 直接写出 UTF-8-SIG 16 列纤维束等效性能 CSV。"""
+    if len(resin_rows) != data.shape[0]:
+        raise RuntimeError(
+            "Resin row count (%d) does not match ODB incremental frames (%d)."
+            % (len(resin_rows), data.shape[0])
+        )
+
+    if sys.version_info[0] >= 3:
+        handle = open(output_csv, "w", encoding="utf-8-sig", newline="")
+        need_bom = False
+    else:
+        handle = open(output_csv, "wb")
+        need_bom = True
+
+    try:
+        if need_bom:
+            handle.write(b"\xef\xbb\xbf")
+        writer = csv.writer(handle)
+        writer.writerow([_csv_cell(col) for col in BUNDLE_HEADERS])
+        for r in range(data.shape[0]):
+            name, e_str, cte_str, nu_str = resin_rows[r]
+            props = ["%.10g" % float(data[r, c]) for c in range(12)]
+            writer.writerow([_csv_cell(x) for x in [name, e_str, cte_str, nu_str] + props])
+    finally:
+        handle.close()
+
+
 def main():
     L = H = W = float(CELL_SIZE_MM)
     dispx, dispy, dispz = L * 0.2, H * 0.2, W * 0.2
@@ -118,9 +167,7 @@ def main():
     _extract_scalar(ODB_MAP["G23"], data, 8, "RP6", 1, L * H, (dispy / W) + (dispz / H))
     _extract_cte(ODB_MAP["CTE"], data, L, H, W, 100.0)
 
-    with open(OUTPUT_TXT, "w") as out:
-        for r in range(data.shape[0]):
-            out.write("\t".join("%e" % data[r, c] for c in range(12)) + "\n")
+    _write_bundle_csv(OUTPUT_CSV, RESIN_ROWS, data)
 
 
 main()

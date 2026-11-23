@@ -17,15 +17,15 @@ from ..common.abaqus_utils import (
     safe_ascii_temp_dir,
 )
 from ..common.resources import package_resource
-from ..common.utils import clean_float
-from .bundle import build_fiber_bundle_rows, export_fiber_bundle_csv, read_mechanical_constants
+from ..common.utils import clean_float, format_number
+from .bundle import read_fiber_bundle_csv
 from .rve import (
     UMAT_CTE_SUBROUTINE,
     UMAT_SUBROUTINE,
     FiberTemplate,
     ResinProperty,
     _parse_cell_size_um,
-    plan_fiber_output_dirs,
+    plan_fiber_output_csvs,
     stage_fiber_case_files,
 )
 
@@ -70,7 +70,6 @@ class FiberSolveResult:
     output_dir: Path
     status: str  # "succeeded" | "failed" | "cancelled"
     message: str = ""
-    constants_path: Path | None = None
     bundle_csv_path: Path | None = None
 
 
@@ -187,20 +186,23 @@ def _run_direction_job(
 def solve_single_fiber_case(
     template: FiberTemplate,
     resins: list[ResinProperty],
-    output_dir: Path,
+    output_csv: Path,
     config: FiberSolveConfig,
     *,
     on_step: Callable[[str], None] | None = None,
     on_log: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> FiberSolveResult:
-    """默认 7 方向同时并发求解单个 Fiber 模板，算完仅输出干净结果，零 ODB 残留。"""
+    """默认 7 方向同时并发求解单个 Fiber 模板，直接提取并原子写出唯一一份纤维束 CSV。"""
+    target = Path(output_csv).resolve()
     if cancel_event is not None and cancel_event.is_set():
-        return FiberSolveResult(template, output_dir, "cancelled", "已取消")
+        return FiberSolveResult(template, target.parent, "cancelled", "已取消")
 
     cell_um = template.cell_size_um or _parse_cell_size_um(template.path)
     if cell_um is None:
-        return FiberSolveResult(template, output_dir, "failed", f"无法解析模板单胞尺寸：{template.name}")
+        return FiberSolveResult(
+            template, target.parent, "failed", f"无法解析模板单胞尺寸：{template.name}"
+        )
 
     try:
         active_parallel = min(config.max_parallel, len(FIBER_JOBS))
@@ -264,11 +266,22 @@ def solve_single_fiber_case(
                         on_step(f"{job_name} 完成")
 
             if cancel_event is not None and cancel_event.is_set():
-                return FiberSolveResult(template, output_dir, "cancelled", "已取消")
+                return FiberSolveResult(template, target.parent, "cancelled", "已取消")
             if first_error or len(odb_map) != len(FIBER_JOBS):
-                return FiberSolveResult(template, output_dir, "failed", first_error or "部分方向未完成")
+                return FiberSolveResult(
+                    template, target.parent, "failed", first_error or "部分方向未完成"
+                )
 
-            # 2) 仅启动 1 次 CAE 统一提取 7 个 ODB，兼容单组与多组树脂
+            # 2) 仅启动 1 次 CAE 统一提取 7 个 ODB 并直接生成 16 列纤维束 CSV
+            resin_rows = [
+                (
+                    resin.name,
+                    format_number(resin.e_mpa),
+                    format_number(resin.cte_e5),
+                    format_number(resin.poisson),
+                )
+                for resin in resins
+            ]
             post_tpl = Template(
                 package_resource("fiber/templates/fiber_post.py.tpl").read_text(encoding="utf-8")
             )
@@ -277,12 +290,13 @@ def solve_single_fiber_case(
                 post_tpl.substitute(
                     cell_size_mm=repr(clean_float(cell_um / 1000.0)),
                     odb_map=repr(odb_map),
-                    output_txt=repr("Mechanical_constants.txt"),
+                    resin_rows=repr(resin_rows),
+                    output_csv=repr(target.name),
                 ),
                 encoding="utf-8",
             )
             if on_log is not None:
-                on_log(f"[后处理] {template.group}um 提取 7 方向结果并生成纤维束 CSV…")
+                on_log(f"[后处理] {template.group}um 直接提取 7 方向结果至 {target.name}…")
 
             rc_post, cancelled = run_cancellable_command(
                 [config.abaqus_command.strip(), "cae", f"noGUI={post_py.name}"],
@@ -291,39 +305,39 @@ def solve_single_fiber_case(
                 cancel_event,
             )
             if cancelled:
-                return FiberSolveResult(template, output_dir, "cancelled", "已取消")
+                return FiberSolveResult(template, target.parent, "cancelled", "已取消")
 
-            constants_tmp = tmp_root / "Mechanical_constants.txt"
-            if rc_post != 0 or not constants_tmp.is_file():
+            bundle_tmp = tmp_root / target.name
+            if rc_post != 0 or not bundle_tmp.is_file():
                 return FiberSolveResult(
-                    template, output_dir, "failed", f"Fiber ODB 后处理失败（退出码 {rc_post}）"
+                    template, target.parent, "failed", f"Fiber ODB 后处理失败（退出码 {rc_post}）"
                 )
 
-            # 3) 校验并合并，原子发布到目标目录（仅保留 3 份干净文件）
-            constants = read_mechanical_constants(constants_tmp)
-            bundle_rows = build_fiber_bundle_rows(resins, constants)
+            # 3) 校验 CSV 完整性并原子发布唯一目标文件（零多余中间文件）
+            parsed_rows = read_fiber_bundle_csv(bundle_tmp)
+            if len(parsed_rows) != len(resins):
+                return FiberSolveResult(
+                    template,
+                    target.parent,
+                    "failed",
+                    f"提取 CSV 行数（{len(parsed_rows)}）与输入树脂数（{len(resins)}）不一致",
+                )
 
-            target = Path(output_dir).resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
-            with TemporaryDirectory(dir=target.parent, prefix=".pp-fiber-") as stage_parent:
-                staged = Path(stage_parent) / target.name
-                staged.mkdir()
-                shutil.copy2(inputs_dir / "resin_inputs.csv", staged / "resin_inputs.csv")
-                shutil.copy2(constants_tmp, staged / "Mechanical_constants.txt")
-                bundle_name = f"{target.name}_fiber_bundle.csv"
-                export_fiber_bundle_csv(bundle_rows, staged / bundle_name)
-                staged.rename(target)
+            with TemporaryDirectory(dir=target.parent, prefix=".pp-fiber-") as stage_dir:
+                staged = Path(stage_dir) / target.name
+                shutil.copy2(bundle_tmp, staged)
+                staged.replace(target)
 
             return FiberSolveResult(
                 template=template,
-                output_dir=target,
+                output_dir=target.parent,
                 status="succeeded",
                 message=str(target),
-                constants_path=target / "Mechanical_constants.txt",
-                bundle_csv_path=target / f"{target.name}_fiber_bundle.csv",
+                bundle_csv_path=target,
             )
     except Exception as error:
-        return FiberSolveResult(template, output_dir, "failed", str(error))
+        return FiberSolveResult(template, target.parent, "failed", str(error))
 
 
 def run_fiber_solve_batch(
@@ -340,23 +354,23 @@ def run_fiber_solve_batch(
     """按模板顺序逐个 7 路并发求解，并实时汇总进度与结果。"""
     if not resins:
         raise ValueError("请填写至少一组树脂性能参数。")
-    planned = plan_fiber_output_dirs(templates, output_parent, batch_name)
+    planned = plan_fiber_output_csvs(templates, output_parent, batch_name)
 
     total_steps = len(planned) * len(FIBER_JOBS)
     done_steps = 0
     results: list[FiberSolveResult] = []
     counts = {"succeeded": 0, "failed": 0, "cancelled": 0}
 
-    for idx, (template, destination) in enumerate(planned):
+    for idx, (template, target_csv) in enumerate(planned):
         if cancel_event is not None and cancel_event.is_set():
-            for rem_tmpl, rem_dest in planned[idx:]:
-                res = FiberSolveResult(rem_tmpl, rem_dest, "cancelled", "已取消")
+            for rem_tmpl, rem_csv in planned[idx:]:
+                res = FiberSolveResult(rem_tmpl, rem_csv.parent, "cancelled", "已取消")
                 results.append(res)
                 counts["cancelled"] += 1
             break
 
         if on_log is not None:
-            on_log(f"=== 开始求解模板 {template.group} μm ({template.name}) → {destination.name} ===")
+            on_log(f"=== 开始求解模板 {template.group} μm ({template.name}) → {target_csv.name} ===")
 
         def _tick(msg: str) -> None:
             nonlocal done_steps
@@ -367,7 +381,7 @@ def run_fiber_solve_batch(
         res = solve_single_fiber_case(
             template,
             resins,
-            destination,
+            target_csv,
             config,
             on_step=_tick,
             on_log=on_log,

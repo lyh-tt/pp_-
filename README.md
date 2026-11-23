@@ -8,7 +8,7 @@ Windows 下双击项目目录里的 **材料多尺度建模处理工具箱.cmd**
 
 ~~~text
 <工程目录>/
-├── 01_fiber/                          # 第 1 步产出：resin_inputs.csv、Mechanical_constants.txt、*_fiber_bundle.csv
+├── 01_fiber/                          # 第 1 步直接产出：fiber_<直径>um_<批次>_fiber_bundle.csv
 ├── 02_texgen/                         # 第 2 步产出：TexGen 建模总脚本与各厚度工况 .inp / .ori / .eld
 ├── 03_rpt/                            # 第 3 步产出：各厚度模型/树脂工况 pp*.rpt（零 ODB 残留）
 └── effective_properties_summary.csv   # 最终端到端汇总总表（MPa / ppm/K）
@@ -16,7 +16,7 @@ Windows 下双击项目目录里的 **材料多尺度建模处理工具箱.cmd**
 
 左侧导航精简为 **3 个核心步骤**：
 
-1. **1. Fiber 微观求解**：勾选 5 / 6 / 7 μm 单丝模板并输入树脂参数，一键 7 方向并行求解（总内存自动控制在总物理内存 90% 以内，零 ODB 残留），自动产出 `Mechanical_constants.txt` 与 `*_fiber_bundle.csv` 并联动至第 3 步；同时内置 **合成已有 CSV…** 辅助弹窗兼容离线/服务器求解结果，并支持导出独立并行脚本 `run_fiber_parallel.py`。
+1. **1. Fiber 微观求解**：勾选 5 / 6 / 7 μm 单丝模板并输入树脂参数，一键 7 方向并行求解（总内存自动控制在总物理内存 90% 以内，零 ODB 残留），从 ODB 直接提取并输出唯一一份 16 列 `*_fiber_bundle.csv` 自动联动至第 3 步；同时支持导出附带 `run_fiber_parallel.py` 的独立求解目录供服务器直接出 CSV。
 2. **2. TexGen 细观建模**：内置 5 款常见玻纤布预设（`PP1080` / `PP2116` / `PP3313` / `PP1035` / `PP1027`）并支持本地保存/删除自定义预设，按总厚度或剩余树脂厚度批量导出 2 × 2 平纹 TexGen 建模脚本，自动联动第 3 步。
 3. **3. 细观求解与汇总**：自动带入第 1 步纤维束 CSV 与第 2 步 TexGen 几何目录；本机并发求解 Abaqus（纯英文隔离临时目录、断点续算、仅保留 RPT）后自动在「RPT 汇总表」标签页解析全部 `.rpt` 并导出 `effective_properties_summary.csv`，也支持导出独立脚本 `run_abaqus_batch.py` 或单独导入外部 RPT 目录汇总。
 
@@ -25,19 +25,18 @@ Windows 下双击项目目录里的 **材料多尺度建模处理工具箱.cmd**
 ~~~text
 src/multiscale/
 ├── common/   # 资源定位、数值/文本工具、Abaqus 隔离临时目录与 90% 内存预算、工程目录布局
-├── fiber/    # 第 1 步：微观 RVE、默认 7 路并行求解、纤维束 CSV
+├── fiber/    # 第 1 步：微观 RVE、默认 7 路并行求解、ODB 直接导出 16 列纤维束 CSV
 ├── texgen/   # 第 2 步：平纹织物几何、常见玻纤布预设与 TexGen 批量脚本导出
 ├── abaqus/   # 第 3 步：TexGen-Abaqus 批量求解与独立脚本导出
 ├── post/     # 第 3 步：RPT 解析与汇总 CSV
-└── ui/       # PySide6 图形界面（顶部工程条 + 3 步主页面 + 辅助 CSV 弹窗）
+└── ui/       # PySide6 图形界面（顶部工程条 + 3 步主页面）
 ~~~
 
 ## 1. Fiber 微观求解说明
 
 - RVE 模板库内置管理（按单丝直径分为 5 / 6 / 7 μm 组），界面直接展示分组供勾选。
 - 树脂性能支持表格逐行输入、**批量粘贴…**（兼容旧 APP `(E, CTE, ν),` 元组列表与表格文本）或 **导入 CSV…**（参考 [examples/resin_inputs_example.csv](examples/resin_inputs_example.csv) 或点击 **示例 CSV…**）。
-- **开始本机求解** 默认对 7 个方向同时并发提交（自动均分 ≤ 90% 物理内存，在纯英文隔离目录运行），完成后自动产出 `Mechanical_constants.txt` 与 `*_fiber_bundle.csv`；点击 **生成求解文件** 则输出 `.inp` / `.f` / `resin_inputs.csv` 与服务器独立并行脚本 `run_fiber_parallel.py`。
-- 若已在服务器跑完求解，可点击 **合成已有 CSV…** 读取 `Mechanical_constants.txt` 合成为标准纤维束 CSV 并自动带入第 3 步。
+- **开始本机求解** 默认对 7 个方向同时并发提交（自动均分 ≤ 90% 物理内存，在纯英文隔离目录运行），后处理一次提取 7 个 ODB 直接输出 `01_fiber/fiber_<直径>um_<批次>_fiber_bundle.csv` 并自动带入第 3 步（无多余 `.txt` 或 `.odb` 残留）；点击 **生成求解文件** 则输出 `.inp` / `.f` / `resin_inputs.csv` 与服务器独立并行脚本 `run_fiber_parallel.py`。
 
 ## 2. TexGen 细观建模说明
 

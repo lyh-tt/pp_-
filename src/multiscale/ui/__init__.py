@@ -9,9 +9,9 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from ..common.resources import is_frozen, package_resource
+from ..fiber.bundle import BUNDLE_CSV_COLUMNS
 from ..fiber.rve import default_sample_resin_csv, read_resin_csv
 from ..texgen.presets import BUILTIN_FABRIC_PRESETS
-from .pages.bundle_dialog import FiberBundleDialog
 from .window import ToolboxWindow
 
 
@@ -29,7 +29,7 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         project_root = Path(tmp) / "project_check"
         window.set_project_dir(project_root)
 
-        # 第 1 步：生成 Fiber 求解目录，并测试从已有结果目录合成纤维束 CSV
+        # 第 1 步：生成 Fiber 求解文件，并直接准备标准 16 列 *_fiber_bundle.csv 联动下游
         fiber_page.template_selector.select_all()
         fiber_page.resin_editor.set_resins(sample_resins, replace=True)
         fiber_page.batch_name.setText("check")
@@ -41,25 +41,14 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         if not fiber_generated:
             raise RuntimeError(f"Fiber generation self-check failed: {fiber_page.notice.text()}")
 
-        first_fiber_dir = fiber_page.last_results[0].output_dir
-        (first_fiber_dir / "Mechanical_constants.txt").write_text(
-            "\n".join(
-                "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5"
-                for _ in sample_resins
+        bundle_csv = window.workspace.layout.fiber_dir / "fiber_5um_check_fiber_bundle.csv"
+        lines = [",".join(BUNDLE_CSV_COLUMNS)]
+        for resin in sample_resins:
+            lines.append(
+                f"{resin.name},{resin.e_mpa},{resin.cte_e5},{resin.poisson},"
+                "57000,27400,27500,0.24,0.24,0.41,12000,12100,14000,5e-6,1.2e-5,1.3e-5"
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        bundle_dlg = FiberBundleDialog(window.workspace.layout.fiber_dir, fiber_page)
-        try:
-            bundle_dlg.load_result_dir(first_fiber_dir)
-            bundle_csv = bundle_dlg.generate()
-        finally:
-            bundle_dlg.close()
-            bundle_dlg.deleteLater()
-        bundle_generated = bundle_csv is not None and bundle_csv.is_file()
-        if not bundle_generated:
-            raise RuntimeError(f"Fiber bundle CSV self-check failed: {bundle_dlg.notice.text()}")
+        bundle_csv.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
         window.workspace.notify_fiber_csv(bundle_csv)
 
         # 第 2 步：选择内置 PP1080 织物预设并生成 TexGen 批量建模脚本
@@ -117,7 +106,6 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         "sample_csv_count": len(sample_resins),
         "fiber_generated": fiber_generated,
         "texgen_generated": texgen_generated,
-        "bundle_generated": bundle_generated,
         "abaqus_runner_exported": abaqus_runner_exported,
         "rpt_summary_exported": rpt_summary_exported,
     }

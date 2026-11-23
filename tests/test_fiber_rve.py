@@ -264,11 +264,11 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
         button_texts = [btn.text() for btn in page.findChildren(QPushButton)]
         label_texts = [lbl.text() for lbl in page.findChildren(QLabel)]
         assert "更换模板库…" not in button_texts
+        assert "合成已有 CSV…" not in button_texts
         assert "模板库目录" not in label_texts
         assert "7 方向并发求解与内存安全配置" not in label_texts
         assert page.findChildren(QSpinBox) == []
         assert "示例 CSV…" in button_texts
-        assert "合成已有 CSV…" in button_texts
         assert Path(page.output_path.text()) == (out_dir / "01_fiber")
 
         # Resin name column is compact (Interactive <= 140), while numerical columns Stretch.
@@ -353,7 +353,6 @@ def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:
             "sample_csv_count": 2,
             "fiber_generated": True,
             "texgen_generated": True,
-            "bundle_generated": True,
             "abaqus_runner_exported": True,
             "rpt_summary_exported": True,
         }

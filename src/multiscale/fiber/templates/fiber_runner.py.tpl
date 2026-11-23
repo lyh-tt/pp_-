@@ -4,7 +4,7 @@
 核心流程：
 1. 根据当前机器总物理内存自动按 <= 90% 总额均分给并发任务，避免手工配置单任务内存；
 2. 默认 7 个方向（E11/E22/E33/G12/G13/G23/CTE）在纯英文隔离临时目录同时提交；
-3. 全部收敛后仅启动 1 次 CAE 统一提取 Mechanical_constants.txt 并合并 *_fiber_bundle.csv；
+3. 全部收敛后仅启动 1 次 CAE 直接提取 7 个 ODB 并写出 16 列 *_fiber_bundle.csv；
 4. 运行结束自动清理全部 .odb/.dat/.dll 等过程文件（可用 --keep-odb 保留）。
 """
 import argparse
@@ -52,11 +52,6 @@ FAIL_KEYS = (
 SUCCESS_KEYS = (
     "THE ANALYSIS HAS COMPLETED SUCCESSFULLY",
     "THE ANALYSIS HAS BEEN COMPLETED",
-)
-BUNDLE_HEADERS = (
-    "Resin Name", "E1MPa", "CTE/e-5", "Poisson",
-    "E1", "E2", "E3", "V12", "V13", "V23",
-    "G12", "G13", "G23", "CTE_X", "CTE_Y", "CTE_Z",
 )
 
 _LOG_LOCK = threading.Lock()
@@ -194,33 +189,22 @@ def submit_one_direction(case_dir, tmp_root, abaqus_cmd, direction, job_name, su
     raise RuntimeError(job_name + " failed: " + last_err)
 
 
-def merge_bundle_csv(case_dir, constants_path):
+def load_resin_rows(case_dir):
     resin_csv = case_dir / "resin_inputs.csv"
     if not resin_csv.is_file():
-        return None
+        raise FileNotFoundError("Missing resin_inputs.csv in " + str(case_dir))
+    rows = []
     with resin_csv.open("r", encoding="utf-8-sig", newline="") as f:
-        resins = list(csv.DictReader(f))
-    constants = [
-        line.split()[:12]
-        for line in constants_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        if line.strip()
-    ]
-    if len(resins) != len(constants):
-        raise ValueError("Row count mismatch: resin_inputs.csv (%d) != Mechanical_constants.txt (%d)" % (len(resins), len(constants)))
-
-    target = case_dir / (case_dir.name + "_fiber_bundle.csv")
-    with target.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(BUNDLE_HEADERS)
-        for res, vec in zip(resins, constants):
-            writer.writerow([
-                res.get("Resin Name", ""),
-                res["E (MPa)"],
-                res["CTE (1e-5/K)"],
-                res["Poisson"],
-                *vec,
-            ])
-    return target
+        for item in csv.DictReader(f):
+            rows.append((
+                item.get("Resin Name", "").strip(),
+                item["E (MPa)"].strip(),
+                item["CTE (1e-5/K)"].strip(),
+                item["Poisson"].strip(),
+            ))
+    if not rows:
+        raise ValueError("resin_inputs.csv is empty in " + str(case_dir))
+    return rows
 
 
 def main():
@@ -234,6 +218,7 @@ def main():
     args = parser.parse_args()
 
     case_dir = args.case_dir.resolve()
+    resin_rows = load_resin_rows(case_dir)
     abaqus_cmd = (args.abaqus or "").strip() or detect_abaqus()
     if not abaqus_cmd:
         sys.exit("Abaqus command not found; pass --abaqus <path>.")
@@ -245,6 +230,7 @@ def main():
             active_parallel, per_job_mem, int(TOTAL_MEMORY_RATIO * 100)
         ))
 
+    bundle_name = case_dir.name + "_fiber_bundle.csv"
     with safe_ascii_temp_dir(prefix="abq-fiber-") as tmp:
         tmp_root = Path(tmp)
         odb_map = {}
@@ -262,32 +248,30 @@ def main():
                 key, rel_odb = fut.result()
                 odb_map[key] = rel_odb
 
-        # 第二阶段：仅启动 1 次 CAE 统一提取所有 7 个 ODB 并写出 Mechanical_constants.txt
+        # 第二阶段：仅启动 1 次 CAE 统一提取所有 7 个 ODB 并直接写出 *_fiber_bundle.csv
         post_py = tmp_root / "extract_fiber.py"
         post_py.write_text(
             POST_TEMPLATE.substitute(
                 cell_size_mm=repr(CELL_SIZE_MM),
                 odb_map=repr(odb_map),
-                output_txt=repr("Mechanical_constants.txt"),
+                resin_rows=repr(resin_rows),
+                output_csv=repr(bundle_name),
             ),
             encoding="utf-8",
         )
-        log("[Post] Extracting Mechanical_constants.txt ...")
+        log("[Post] Extracting direct bundle CSV: " + bundle_name + " ...")
         rc = run_cmd([abaqus_cmd, "cae", "noGUI=" + post_py.name], tmp_root, tmp_root / "post.log")
-        constants_tmp = tmp_root / "Mechanical_constants.txt"
-        if rc != 0 or not constants_tmp.is_file():
+        bundle_tmp = tmp_root / bundle_name
+        if rc != 0 or not bundle_tmp.is_file():
             sys.exit("Post-processing failed (see post.log), exit code: %d" % rc)
 
-        constants_dst = case_dir / "Mechanical_constants.txt"
-        shutil.copy2(constants_tmp, constants_dst)
-        bundle_dst = merge_bundle_csv(case_dir, constants_dst)
+        bundle_dst = case_dir / bundle_name
+        shutil.copy2(bundle_tmp, bundle_dst)
         if args.keep_odb:
             for rel_odb in odb_map.values():
                 shutil.copy2(tmp_root / rel_odb, case_dir / Path(rel_odb).name)
 
-    log("Completed: " + str(constants_dst))
-    if bundle_dst is not None:
-        log("Merged bundle CSV: " + str(bundle_dst))
+    log("Completed bundle CSV: " + str(bundle_dst))
 
 
 if __name__ == "__main__":

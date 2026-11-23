@@ -35,7 +35,7 @@ from ...fiber.rve import (
     discover_fiber_templates,
     generate_fiber_cases,
     parse_resin_text,
-    plan_fiber_output_dirs,
+    plan_fiber_output_csvs,
     read_resin_csv,
     write_sample_resin_csv,
 )
@@ -525,7 +525,7 @@ class FiberRvePage(QWidget):
         titles.addWidget(label("1. Fiber 微观求解", "PageTitle"))
         titles.addWidget(
             label(
-                "勾选直径模板与树脂参数，默认 7 方向并行求解并自动产出纤维束 CSV（自动联动至第 3 步）",
+                "勾选直径模板与树脂参数，默认 7 方向并行求解并直接提取为纤维束 CSV（自动联动至第 3 步）",
                 "PageSubtitle",
             )
         )
@@ -585,11 +585,6 @@ class FiberRvePage(QWidget):
         self.batch_name.setAccessibleName("Fiber 批次名称")
         batch_row.addWidget(self.batch_name, 1)
 
-        self.bundle_btn = QPushButton("合成已有 CSV…")
-        self.bundle_btn.setToolTip("读取已完成的 Mechanical_constants.txt 合成为纤维束 CSV")
-        self.bundle_btn.clicked.connect(self._open_bundle_dialog)
-        batch_row.addWidget(self.bundle_btn)
-
         self.generate_btn = QPushButton("生成求解文件")
         self.generate_btn.clicked.connect(self._generate)
         batch_row.addWidget(self.generate_btn)
@@ -612,7 +607,7 @@ class FiberRvePage(QWidget):
 
         status_row = QHBoxLayout()
         self.notice = label(
-            "勾选 Fiber 模板并填写树脂参数后，可直接本机 7 方向并行求解或导出求解文件。",
+            "勾选 Fiber 模板并填写树脂参数后，点击「开始本机求解」即可直接提取输出 16 列纤维束 CSV。",
             "Notice",
             wrap=True,
         )
@@ -624,7 +619,7 @@ class FiberRvePage(QWidget):
         buttons.setSpacing(6)
         for title, handler in (
             ("打开输出目录", self._open_output),
-            ("复制目录路径", self._copy_paths),
+            ("复制输出路径", self._copy_paths),
         ):
             action = QPushButton(title)
             action.clicked.connect(handler)
@@ -657,15 +652,6 @@ class FiberRvePage(QWidget):
         if selected:
             output = str(Path(selected))
             self.output_path.setText(output)
-
-    def _open_bundle_dialog(self) -> None:
-        from .bundle_dialog import FiberBundleDialog
-
-        dialog = FiberBundleDialog(Path(self.output_path.text()), self)
-        dialog.exec()
-        if dialog.last_csv is not None and dialog.last_csv.is_file():
-            self.workspace.notify_fiber_csv(dialog.last_csv)
-            self._notify(f"已合成纤维束 CSV 并自动关联至第 3 步：{dialog.last_csv.name}")
 
     def _choose_resin_csv(self) -> None:
         saved_csv = self.settings.value("fiber_resin_csv", "", type=str)
@@ -752,7 +738,7 @@ class FiberRvePage(QWidget):
             templates = self.template_selector.selected_templates()
             resins = self.resin_editor.resins()
             out_parent = Path(self.output_path.text())
-            plan_fiber_output_dirs(templates, out_parent, self.batch_name.text())
+            plan_fiber_output_csvs(templates, out_parent, self.batch_name.text())
         except (OSError, ValueError) as error:
             self._notify(str(error), error=True)
             return
@@ -814,7 +800,7 @@ class FiberRvePage(QWidget):
             f"Fiber 并行求解完成：成功 {summary.succeeded}，失败 {summary.failed}，取消 {summary.cancelled}（共 {summary.total}）。"
         )
         if succeeded:
-            msg += " 已直接产出 Mechanical_constants.txt 与 *_fiber_bundle.csv，并已自动关联至第 3 步。"
+            msg += " 已直接提取输出 *_fiber_bundle.csv，并已自动关联至第 3 步。"
         if first_err:
             msg += f" 失败原因：{first_err}"
         self._notify(msg, error=summary.failed > 0)
@@ -824,7 +810,6 @@ class FiberRvePage(QWidget):
         self._notify(f"求解异常：{message}", error=True)
 
     def _set_running(self, running: bool) -> None:
-        self.bundle_btn.setEnabled(not running)
         self.generate_btn.setEnabled(not running)
         self.solve_btn.setEnabled(not running)
         self.stop_btn.setVisible(running)
@@ -838,19 +823,22 @@ class FiberRvePage(QWidget):
     def _open_output(self) -> None:
         if not self.last_results:
             return
-        target = (
-            self.last_results[0].output_dir
-            if len(self.last_results) == 1
-            else self.last_results[0].output_dir.parent
-        )
+        first = self.last_results[0]
+        if getattr(first, "bundle_csv_path", None) is not None or len(self.last_results) == 1:
+            target = first.output_dir
+        else:
+            target = first.output_dir.parent
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _copy_paths(self) -> None:
         if not self.last_results:
             return
-        text = "\n".join(str(item.output_dir) for item in self.last_results)
-        QApplication.clipboard().setText(text)
-        self._notify(f"已复制 {len(self.last_results)} 个生成目录路径。")
+        paths = [
+            str(getattr(item, "bundle_csv_path", None) or item.output_dir)
+            for item in self.last_results
+        ]
+        QApplication.clipboard().setText("\n".join(paths))
+        self._notify(f"已复制 {len(paths)} 个输出路径。")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._worker is not None and self._worker.isRunning():

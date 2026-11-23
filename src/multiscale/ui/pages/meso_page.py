@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...abaqus.batch import (
+    AbaqusTask,
     BatchSummary,
     SolveConfig,
     TaskResult,
@@ -34,6 +35,7 @@ from ...abaqus.batch import (
     detect_abaqus_command,
     discover_texgen_models,
     export_standalone_runner,
+    format_duration,
     plan_abaqus_tasks,
     run_abaqus_batch,
 )
@@ -76,6 +78,7 @@ _PREVIEW_COLUMNS = (
 
 
 class _SolveWorker(QThread):
+    task_started = Signal(object)
     progress_changed = Signal(int, int, object)
     log_emitted = Signal(str)
     finished_summary = Signal(object)
@@ -99,6 +102,7 @@ class _SolveWorker(QThread):
                 self._config,
                 on_progress=lambda done, total, res: self.progress_changed.emit(done, total, res),
                 on_log=self.log_emitted.emit,
+                on_task_start=self.task_started.emit,
                 cancel_event=self._cancel_event,
             )
             self.finished_summary.emit(summary)
@@ -124,6 +128,10 @@ class MesoSolvePage(QWidget):
         self._rows: list[FiberBundleRow] = []
         self._worker: _SolveWorker | None = None
         self._cancel_event = threading.Event()
+        self._active_parallel = 1
+        self._run_total = 0
+        self._run_counts = {"succeeded": 0, "skipped": 0, "failed": 0, "cancelled": 0}
+        self._run_durations: list[float] = []
         self.last_script: Path | None = None
 
         # Tab 1（RPT 汇总）状态
@@ -222,7 +230,7 @@ class MesoSolvePage(QWidget):
         layout.addLayout(csv_row)
 
         self.input_hint = label(
-            "每个选中的几何模型与 CSV 中的每组材料组合为一个求解任务，结果输出为 <RPT 输出目录>/<模型名>/pp*.rpt。",
+            "每个选中的几何模型与 CSV 中的每组材料组合为一个求解任务，结果按序号顺序输出为 <RPT 输出目录>/<模型名>/001_<牌号>.rpt（无牌号时自动按 001_E<MPa>_CTE<e-5>.rpt 命名）。",
             "Hint",
             wrap=True,
         )
@@ -286,6 +294,9 @@ class MesoSolvePage(QWidget):
         opts_row.addStretch()
         layout.addLayout(opts_row)
 
+        self.live_status = label("等待开始批量求解。", "Hint", wrap=True)
+        layout.addWidget(self.live_status)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
@@ -294,7 +305,7 @@ class MesoSolvePage(QWidget):
 
         self.log_view = QPlainTextEdit(objectName="RunLog")
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(600)
+        self.log_view.setMaximumBlockCount(3000)
         self.log_view.setMinimumHeight(140)
         self.log_view.setPlaceholderText("求解日志将在此实时显示；中间 ODB/INP/临时文件在提取 RPT 后自动清理。")
         layout.addWidget(self.log_view, 1)
@@ -519,6 +530,10 @@ class MesoSolvePage(QWidget):
         self.rpt_result.hide()
         self.rpt_badge.setText("未加载 RPT")
         self.tabs.setTabText(1, "RPT 汇总表")
+        self.live_status.setText("等待开始批量求解。")
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFormat("等待运行")
         self._set_rpt_input_status(
             "本页默认监控当前工程的 03_rpt 目录并自动刷新；也可选择任意已有 RPT 目录进行解析汇总。",
             error=False,
@@ -723,14 +738,20 @@ class MesoSolvePage(QWidget):
             return
 
         self._cancel_event.clear()
+        self._active_parallel = config.max_parallel
+        self._run_total = len(tasks)
+        self._run_counts = {"succeeded": 0, "skipped": 0, "failed": 0, "cancelled": 0}
+        self._run_durations = []
         self.log_view.clear()
         self.progress.setRange(0, len(tasks))
         self.progress.setValue(0)
-        self.progress.setFormat(f"%v / {len(tasks)}")
+        self.progress.setFormat(f"已完成 0 / {len(tasks)}")
+        self.live_status.setText(f"准备启动 {len(tasks)} 个求解任务（并行 {config.max_parallel}）…")
         self._set_running(True)
         self._notify(f"开始本机批量求解，共 {len(tasks)} 个任务…")
 
         self._worker = _SolveWorker(tasks, config, self._cancel_event)
+        self._worker.task_started.connect(self._on_task_started)
         self._worker.progress_changed.connect(self._on_progress)
         self._worker.log_emitted.connect(self.log_view.appendPlainText)
         self._worker.finished_summary.connect(self._on_finished)
@@ -741,20 +762,89 @@ class MesoSolvePage(QWidget):
         if self._worker is not None and self._worker.isRunning():
             self._cancel_event.set()
             self.stop_btn.setEnabled(False)
+            self.live_status.setText("正在停止当前 Abaqus 子进程并清理临时目录…")
             self._notify("正在终止当前 Abaqus 子进程并清理临时目录…")
 
-    def _on_progress(self, done: int, total: int, _result: TaskResult) -> None:
+    def _on_task_started(self, task: AbaqusTask) -> None:
+        width = max(3, len(str(task.total_resins)))
+        seq = f"#{task.resin_index:0{width}d}"
+        name = task.row.resin_name.strip()
+        resin_label = f"{seq} {name}" if name else seq
+        s = self._run_counts["succeeded"]
+        k = self._run_counts["skipped"]
+        f = self._run_counts["failed"]
+        self.live_status.setText(
+            f"正在计算 [{task.task_index}/{task.total_tasks}]：{task.model.name}"
+            f"（模型 {task.model_index}/{task.total_models}）· {resin_label}"
+            f"（材料 {task.resin_index}/{task.total_resins}）  |  成功 {s} · 跳过 {k} · 失败 {f}"
+        )
+
+    def _on_progress(self, _done: int, total: int, result: TaskResult) -> None:
+        self._run_counts[result.status] = self._run_counts.get(result.status, 0) + 1
+        if result.status == "succeeded" and result.elapsed_sec > 0:
+            self._run_durations.append(result.elapsed_sec)
+
+        # 取消任务不计入已完成进度条，防止停止时进度条误满格
+        executed = (
+            self._run_counts["succeeded"]
+            + self._run_counts["skipped"]
+            + self._run_counts["failed"]
+        )
         self.progress.setRange(0, max(1, total))
-        self.progress.setValue(done)
+        self.progress.setValue(executed)
+
+        if result.status != "cancelled":
+            s = self._run_counts["succeeded"]
+            k = self._run_counts["skipped"]
+            f = self._run_counts["failed"]
+            fmt = f"已完成 {executed} / {total}（成功 {s} · 跳过 {k} · 失败 {f}）"
+            if self._run_durations:
+                avg_sec = sum(self._run_durations) / len(self._run_durations)
+                remaining = max(0, total - (executed + self._run_counts["cancelled"]))
+                if remaining > 0:
+                    eta_sec = (avg_sec * remaining) / max(1, self._active_parallel)
+                    fmt += f" · 均耗 {format_duration(avg_sec)} · 预计剩余 ~{format_duration(eta_sec)}"
+            self.progress.setFormat(fmt)
 
     def _on_finished(self, summary: BatchSummary) -> None:
         self._set_running(False)
-        text = (
-            f"求解结束：成功 {summary.succeeded}，跳过 {summary.skipped}，"
-            f"失败 {summary.failed}，取消 {summary.cancelled}（共 {summary.total}）。"
-        )
-        if (summary.succeeded + summary.skipped) > 0:
-            out_dir = Path(self.output_dir_edit.text())
+        executed = summary.succeeded + summary.skipped + summary.failed
+        self.progress.setRange(0, max(1, summary.total))
+        self.progress.setValue(executed)
+
+        if summary.cancelled > 0:
+            self.progress.setFormat(
+                f"已停止：{executed} / {summary.total}"
+                f"（成功 {summary.succeeded} · 跳过 {summary.skipped} · 失败 {summary.failed} · 未执行 {summary.cancelled}）"
+            )
+            self.live_status.setText(
+                f"已停止求解：已完成 {executed} / {summary.total}（未执行 {summary.cancelled}），"
+                "已出结果已刷新至「RPT 汇总表」。"
+            )
+            self.log_view.appendPlainText(
+                f"[已停止] 当前进度：成功 {summary.succeeded} / 跳过 {summary.skipped}"
+                f" / 失败 {summary.failed} / 未执行 {summary.cancelled}"
+            )
+            text = (
+                f"已停止：已完成 {executed} / {summary.total}"
+                f"（成功 {summary.succeeded}，跳过 {summary.skipped}，失败 {summary.failed}，未执行 {summary.cancelled}）。"
+            )
+        else:
+            self.progress.setFormat(
+                f"全部完成：{executed} / {summary.total}"
+                f"（成功 {summary.succeeded} · 跳过 {summary.skipped} · 失败 {summary.failed}）"
+            )
+            self.live_status.setText(
+                f"求解完成：{executed} / {summary.total}"
+                f"（成功 {summary.succeeded} · 跳过 {summary.skipped} · 失败 {summary.failed}）"
+            )
+            text = (
+                f"求解结束：成功 {summary.succeeded}，跳过 {summary.skipped}，"
+                f"失败 {summary.failed}（共 {summary.total}）。"
+            )
+
+        out_dir = Path(self.output_dir_edit.text())
+        if out_dir.is_dir() and discover_rpt_files(out_dir):
             self.load_rpt_dir(out_dir)
             if self.auto_summary_check.isChecked() and self._rpt_rows:
                 try:

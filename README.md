@@ -10,7 +10,7 @@ Windows 下双击项目目录里的 **材料多尺度建模处理工具箱.cmd**
 <工程目录>/
 ├── 01_fiber/                          # 第 1 步直接产出：fiber_<直径>um_<批次>_fiber_bundle.csv
 ├── 02_texgen/                         # 第 2 步产出：TexGen 建模总脚本与各厚度工况 .inp / .ori / .eld
-├── 03_rpt/                            # 第 3 步产出：各厚度模型/树脂工况 pp*.rpt（零 ODB 残留）
+├── 03_rpt/                            # 第 3 步产出：各厚度模型/树脂工况 001_<牌号>.rpt（零 ODB 残留）
 └── effective_properties_summary.csv   # 最终端到端汇总总表（MPa / ppm/K）
 ~~~
 

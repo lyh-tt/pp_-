@@ -263,9 +263,40 @@ def test_step4_memory_cli_and_safe_ui_defaults(tmp_path: Path) -> None:
     fake_abq = _write_fake_fiber_abaqus(tmp_path / "tools", expected_memory_mb=12288)
     model = TexGenModel("PP1080_60", inp_path, ori_path)
     tasks = plan_abaqus_tasks([model], [row], tmp_path / "rpt_out")
-    config = SolveConfig(abaqus_command=fake_abq, cpus=6, max_parallel=1, retries=0, memory_mb=12288)
-    summary = run_abaqus_batch(tasks, config)
+    logs: list[str] = []
+    # Even with retries=1, a clean run must NOT emit confusing "求解 1/2" attempt logs.
+    config = SolveConfig(abaqus_command=fake_abq, cpus=6, max_parallel=1, retries=1, memory_mb=12288)
+    summary = run_abaqus_batch(tasks, config, on_log=logs.append)
     assert summary.succeeded == 1
+    assert summary.results[0].task.job_name == "001_S8NE"
+    joined_logs = "\n".join(logs)
+    assert "[1/1 开始]" in joined_logs
+    assert "[1/1 完成]" in joined_logs and "耗时" in joined_logs
+    assert "求解 1/2" not in joined_logs
+    assert "重试" not in joined_logs
+
+    # Cleanup WinError 32 simulation: even if shutil.rmtree fails with PermissionError inside
+    # safe_ascii_temp_dir, no exception escapes and run_single_task returns succeeded once without retrying.
+    import shutil
+    real_rmtree = shutil.rmtree
+    monkeypatch_attempts = 0
+    seen_dirs: list[Path] = []
+    try:
+        def _flaky_rmtree(path, ignore_errors=False, onerror=None):
+            nonlocal monkeypatch_attempts
+            monkeypatch_attempts += 1
+            if not ignore_errors:
+                raise PermissionError(32, "simulated WinError 32")
+            seen_dirs.append(Path(path))
+
+        shutil.rmtree = _flaky_rmtree  # type: ignore[assignment]
+        with safe_ascii_temp_dir(prefix="abq-lock-") as locked_dir:
+            assert Path(locked_dir).is_dir()
+        assert monkeypatch_attempts >= 1
+    finally:
+        shutil.rmtree = real_rmtree  # type: ignore[assignment]
+        for d in seen_dirs:
+            real_rmtree(d, ignore_errors=True)
 
     bundle_csv = export_fiber_bundle_csv([row], tmp_path / "bundle.csv")
     runner = export_standalone_runner(
@@ -307,6 +338,20 @@ def test_step5_rpt_parsing_summary_and_ui(tmp_path: Path) -> None:
     (rpt_root / "PP1080_60" / "pp4p6_6e_5.rpt").write_text(rpt_body, encoding="utf-8")
     (rpt_root / "PP1080_80" / "pp4_5p2e_5.rpt").write_text(rpt_body, encoding="utf-8")
     (rpt_root / "PP1080_80" / "corrupt.rpt").write_text("incomplete output\n", encoding="utf-8")
+
+    # Also test mixed Scheme A named + param fallback parsing alongside legacy pp* format.
+    mixed_root = tmp_path / "rpt_mixed"
+    (mixed_root / "PP1080_60").mkdir(parents=True)
+    (mixed_root / "PP1080_60" / "001_S8NE.rpt").write_text(rpt_body, encoding="utf-8")
+    (mixed_root / "PP1080_60" / "002_E4030p56_CTE5p27133.rpt").write_text(rpt_body, encoding="utf-8")
+    (mixed_root / "PP1080_60" / "pp4p6_6e_5.rpt").write_text(rpt_body, encoding="utf-8")
+    mixed_raw, mixed_warn = summarize_rpt_dir(mixed_root)
+    assert not mixed_warn and len(mixed_raw) == 3
+    by_case = {Path(r.source_rpt).name: r for r in mixed_raw}
+    assert by_case["001_S8NE.rpt"].resin == "S8NE"
+    assert by_case["002_E4030p56_CTE5p27133.rpt"].resin_e_mpa == pytest.approx(4030.56)
+    assert by_case["002_E4030p56_CTE5p27133.rpt"].resin_cte_ppm == pytest.approx(52.7133)
+    assert by_case["pp4p6_6e_5.rpt"].resin_e_mpa == pytest.approx(4600.0)
 
     parsed = parse_rpt_file(rpt_root / "PP1080_60" / "pp4p6_6e_5.rpt")
     assert parsed["E1"] == pytest.approx(1.6928e10)

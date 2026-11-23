@@ -15,10 +15,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from string import Template
-from tempfile import TemporaryDirectory
 
 # ===== Configuration =====
 MODELS_DIR = $models_dir
@@ -63,6 +64,7 @@ REQUIRED_CSV_COLUMNS = (
     "CTE_Y",
     "CTE_Z",
 )
+SAFE_RESIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,27}$$")
 
 _LOG_LOCK = threading.Lock()
 
@@ -91,6 +93,33 @@ def format_token(value):
         cleaned = 0.0
     text = ("%.10f" % cleaned).rstrip("0").rstrip(".")
     return text.replace(".", "p")
+
+
+def format_number(value):
+    cleaned = round(float(value), 10)
+    if cleaned == 0:
+        cleaned = 0.0
+    return ("%.10f" % cleaned).rstrip("0").rstrip(".")
+
+
+def format_duration(seconds):
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return "%ds" % total
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return "%dm%02ds" % (minutes, secs)
+    hours, rem_mins = divmod(minutes, 60)
+    return "%dh%02dm" % (hours, rem_mins)
+
+
+def build_task_stem(resin_name, e_mpa, cte_e5, index, pad_width=3):
+    width = max(3, pad_width)
+    seq = "%0*d" % (width, index)
+    clean_name = str(resin_name or "").strip()
+    if clean_name and SAFE_RESIN_NAME_RE.fullmatch(clean_name):
+        return "%s_%s" % (seq, clean_name)
+    return "%s_E%s_CTE%s" % (seq, format_token(e_mpa), format_token(cte_e5))
 
 
 def read_text_fallback(path):
@@ -163,6 +192,7 @@ def read_fiber_bundle_csv(csv_path, default_poisson=0.38):
     if missing:
         raise ValueError("Fiber CSV missing columns: " + ", ".join(missing))
 
+    name_idx = col_idx.get("Resin Name")
     poisson_idx = col_idx.get("Poisson")
     parsed = []
     for row_num, cells in enumerate(rows[1:], start=1):
@@ -177,19 +207,28 @@ def read_fiber_bundle_csv(csv_path, default_poisson=0.38):
         for val in item.values():
             if not math.isfinite(val):
                 raise ValueError("Non-finite value in CSV row %d" % row_num)
-        e_gpa = round(item["E1MPa"] / 1000.0, 10)
-        item["rpt_stem"] = "pp%s_%se_5" % (format_token(e_gpa), format_token(item["CTE/e-5"]))
+        resin_name = cells[name_idx].strip() if name_idx is not None and name_idx < len(cells) else ""
+        item["Resin Name"] = resin_name
         parsed.append(item)
     return parsed
 
 
 def build_tasks(models, rows, output_dir):
     out_root = Path(output_dir).resolve()
+    total_models = len(models)
+    total_resins = len(rows)
+    total_tasks = total_models * total_resins
+    pad_width = max(3, len(str(total_resins)))
+
     tasks = []
-    for model in models:
+    task_index = 0
+    for m_idx, model in enumerate(models, start=1):
         used = {}
-        for row in rows:
-            stem = row["rpt_stem"]
+        for r_idx, row in enumerate(rows, start=1):
+            task_index += 1
+            stem = build_task_stem(
+                row.get("Resin Name", ""), row["E1MPa"], row["CTE/e-5"], r_idx, pad_width
+            )
             count = used.get(stem, 0) + 1
             used[stem] = count
             job_name = stem if count == 1 else "%s_%d" % (stem, count)
@@ -198,6 +237,12 @@ def build_tasks(models, rows, output_dir):
                 "row": row,
                 "job_name": job_name,
                 "output_rpt": out_root / model["name"] / (job_name + ".rpt"),
+                "task_index": task_index,
+                "total_tasks": total_tasks,
+                "model_index": m_idx,
+                "total_models": total_models,
+                "resin_index": r_idx,
+                "total_resins": total_resins,
             })
     return tasks
 
@@ -346,28 +391,63 @@ def run_command(cmd, cwd, log_path):
         return proc.wait()
 
 
-def safe_ascii_temp_dir(prefix="abq-work-"):
-    base = Path(tempfile.gettempdir())
-    if str(base).isascii():
-        return TemporaryDirectory(prefix=prefix)
-    fallback = Path(os.environ.get("SystemDrive", "C:") + os.sep + "abq_tmp") if os.name == "nt" else Path("/tmp/abq_tmp")
-    fallback.mkdir(parents=True, exist_ok=True)
-    return TemporaryDirectory(dir=fallback, prefix=prefix)
+@contextmanager
+def safe_ascii_temp_dir(prefix="abq-work-", base_dir=None):
+    if base_dir is not None:
+        parent = Path(base_dir)
+    else:
+        base = Path(tempfile.gettempdir())
+        if str(base).isascii():
+            parent = base
+        else:
+            parent = Path(os.environ.get("SystemDrive", "C:") + os.sep + "abq_tmp") if os.name == "nt" else Path("/tmp/abq_tmp")
+            parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    try:
+        yield str(tmp_path)
+    finally:
+        for delay in (0.0, 0.3, 0.8):
+            if not tmp_path.exists():
+                break
+            if delay > 0:
+                time.sleep(delay)
+            shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def run_single_task(task, args):
     out_rpt = task["output_rpt"]
-    label = "%s/%s" % (task["model"]["name"], task["job_name"])
+    model = task["model"]
+    row = task["row"]
+    job_name = task["job_name"]
+    pos = "%d/%d" % (task["task_index"], task["total_tasks"])
+    width = max(3, len(str(task["total_resins"])))
+    resin_name = str(row.get("Resin Name", "") or "").strip()
+    resin_tag = ("#%0*d %s" % (width, task["resin_index"], resin_name)) if resin_name else ("#%0*d" % (width, task["resin_index"]))
+
+    if task["resin_index"] == 1:
+        log("=== Model %d/%d: %s (%d resins) ===" % (
+            task["model_index"], task["total_models"], model["name"], task["total_resins"]
+        ))
+
     if args.resume and out_rpt.is_file() and out_rpt.stat().st_size > 0:
-        log("[SKIP] %s (already exists)" % label)
+        log("[%s SKIP] %s | %s (exists %s)" % (pos, model["name"], resin_tag, out_rpt.name))
         return "skipped", ""
 
-    model = task["model"]
-    job_name = task["job_name"]
+    max_attempts = args.retries + 1
+    task_start = time.monotonic()
     last_error = "Unknown failure"
 
-    for attempt in range(1, args.retries + 2):
-        log("[RUN %d/%d] %s" % (attempt, args.retries + 1, label))
+    for attempt in range(1, max_attempts + 1):
+        if attempt == 1:
+            log("[%s START] %s | %s (E=%s MPa, CTE=%se-5)" % (
+                pos, model["name"], resin_tag, format_number(row["E1MPa"]), format_number(row["CTE/e-5"])
+            ))
+        else:
+            log("[%s RETRY %d/%d] %s | %s (prev failed: %s)" % (
+                pos, attempt, max_attempts, model["name"], resin_tag, last_error
+            ))
+
+        saved_ok = False
         try:
             with safe_ascii_temp_dir(prefix="abq-work-") as tmp:
                 work_dir = Path(tmp)
@@ -379,7 +459,7 @@ def run_single_task(task, args):
                     aux_map[model["eld"].name] = job_name + ".eld"
 
                 inp_path = work_dir / (job_name + ".inp")
-                patch_inp(model["inp"], inp_path, task["row"], aux_map)
+                patch_inp(model["inp"], inp_path, row, aux_map)
                 expected_steps = count_inp_steps(inp_path)
 
                 scratch_root = Path(args.scratch_dir) if args.scratch_dir else (work_dir / "scratch")
@@ -429,19 +509,30 @@ def run_single_task(task, args):
                         continue
 
                     out_rpt.parent.mkdir(parents=True, exist_ok=True)
-                    with TemporaryDirectory(dir=str(out_rpt.parent), prefix=".rpt-") as stage:
+                    with safe_ascii_temp_dir(prefix=".rpt-", base_dir=out_rpt.parent) as stage:
                         staged = Path(stage) / out_rpt.name
                         shutil.copy2(rpt_tmp, staged)
                         staged.replace(out_rpt)
-                    log("[DONE] %s -> %s" % (label, out_rpt))
-                    return "succeeded", ""
+                    saved_ok = True
                 finally:
                     if args.scratch_dir and task_scratch.exists():
                         shutil.rmtree(task_scratch, ignore_errors=True)
         except Exception as exc:
-            last_error = str(exc)
+            if not saved_ok:
+                last_error = str(exc)
+                continue
 
-    log("[FAIL] %s: %s" % (label, last_error))
+        if saved_ok:
+            elapsed = time.monotonic() - task_start
+            log("[%s DONE (%s)] %s | %s -> %s" % (
+                pos, format_duration(elapsed), model["name"], resin_tag, out_rpt.name
+            ))
+            return "succeeded", ""
+
+    elapsed = time.monotonic() - task_start
+    log("[%s FAIL (%s)] %s | %s: %s" % (
+        pos, format_duration(elapsed), model["name"], resin_tag, last_error
+    ))
     return "failed", last_error
 
 

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from multiscale.abaqus.batch import BatchSummary
+from multiscale.abaqus.batch import AbaqusTask, BatchSummary, TaskResult, TexGenModel
 from multiscale.common.workspace import (
     ProjectLayout,
     find_latest_fiber_bundle_csv,
@@ -254,7 +254,7 @@ def test_unified_project_dir_switching_and_3step_linkage(
         # Simulate Step 3 solve finish with an .rpt file -> auto-exports summary & fills Tab 1 table.
         rpt_case_dir = proj_a / "03_rpt" / "PP1080_83p5"
         rpt_case_dir.mkdir(parents=True, exist_ok=True)
-        (rpt_case_dir / "pp4p60451_6p04967e_5.rpt").write_text(_sample_rpt_text(), encoding="utf-8")
+        (rpt_case_dir / "001_S8NE.rpt").write_text(_sample_rpt_text(), encoding="utf-8")
         meso_page._on_finished(
             BatchSummary(total=1, succeeded=1, skipped=0, failed=0, cancelled=0, results=())
         )
@@ -264,6 +264,22 @@ def test_unified_project_dir_switching_and_3step_linkage(
         assert meso_page.tabs.tabText(1) == "RPT 汇总表 (1)"
         df_a = pd.read_csv(meso_page.last_summary_csv)
         assert df_a.at[0, "resin"] == "S8NE"
+
+        # Simulate stopping midway (1 succeeded, 4 cancelled) -> progress bar stops at 1/5,
+        # Tab 1 still refreshes with partial completed RPTs.
+        dummy_model = TexGenModel("PP1080_83p5", proj_a / "1.inp", proj_a / "1.ori")
+        dummy_task = AbaqusTask(dummy_model, step1_rows[0], "001_S8NE", rpt_case_dir / "001_S8NE.rpt")
+        meso_page._run_counts = {"succeeded": 0, "skipped": 0, "failed": 0, "cancelled": 0}
+        meso_page._run_durations = []
+        meso_page._on_progress(1, 5, TaskResult(dummy_task, "succeeded", elapsed_sec=12.0))
+        for i in range(2, 6):
+            meso_page._on_progress(i, 5, TaskResult(dummy_task, "cancelled"))
+        meso_page._on_finished(
+            BatchSummary(total=5, succeeded=1, skipped=0, failed=0, cancelled=4, results=())
+        )
+        assert meso_page.progress.value() == 1
+        assert "已停止：1 / 5" in meso_page.progress.format()
+        assert meso_page.preview_table.rowCount() == 1
 
         # Switch to empty Chinese project dir -> resets stale inputs and shows non-ASCII warning.
         proj_b.mkdir(parents=True)
@@ -291,7 +307,7 @@ def test_unified_project_dir_switching_and_3step_linkage(
         (pre_model / "1.ori").write_text("1, 1, 0, 0\n", encoding="utf-8")
         pre_rpt = proj_c / "03_rpt" / "PP1080_80"
         pre_rpt.mkdir(parents=True)
-        (pre_rpt / "pp4p60451_6p04967e_5.rpt").write_text(_sample_rpt_text(), encoding="utf-8")
+        (pre_rpt / "001_S8NE.rpt").write_text(_sample_rpt_text(), encoding="utf-8")
 
         window.set_project_dir(proj_c)
         assert window.project_path_warning.isHidden()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -10,6 +11,8 @@ import pandas as pd
 
 from ..common.utils import clean_float, format_number, read_text_with_fallback
 from .rve import ResinProperty
+
+SAFE_RESIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,27}$")
 
 RESIN_COLUMNS = ("Resin Name", "E1MPa", "CTE/e-5", "Poisson")
 FIBER_RESULT_COLUMNS = (
@@ -74,6 +77,19 @@ class FiberBundleRow:
         e_token = format_number(clean_float(self.e_mpa / 1000.0)).replace(".", "p")
         cte_token = format_number(self.cte_e5).replace(".", "p")
         return f"pp{e_token}_{cte_token}e_5"
+
+    def task_stem(self, index: int, *, pad_width: int = 3) -> str:
+        """生成方案 A 的可读纯 ASCII 任务文件名：001_<牌号> 或 001_E<MPa>_CTE<e-5>。"""
+        if index < 1:
+            raise ValueError("材料序号须大于等于 1。")
+        width = max(3, pad_width)
+        seq = f"{index:0{width}d}"
+        clean_name = self.resin_name.strip()
+        if clean_name and SAFE_RESIN_NAME_RE.fullmatch(clean_name):
+            return f"{seq}_{clean_name}"
+        e_token = format_number(self.e_mpa).replace(".", "p")
+        cte_token = format_number(self.cte_e5).replace(".", "p")
+        return f"{seq}_E{e_token}_CTE{cte_token}"
 
     def to_csv_dict(self) -> dict[str, object]:
         return {

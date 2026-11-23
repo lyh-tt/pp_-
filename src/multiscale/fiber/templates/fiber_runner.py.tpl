@@ -17,10 +17,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from string import Template
-from tempfile import TemporaryDirectory
 
 # ===== 默认配置（默认 7 路全并发，总内存上限 <= 90%）=====
 CELL_SIZE_MM = $cell_size_mm
@@ -116,14 +117,25 @@ def auto_per_job_memory_mb(parallel_jobs, total_ratio=0.90):
     return per_job if per_job >= 64 else None
 
 
+@contextmanager
 def safe_ascii_temp_dir(prefix="abq-fiber-"):
-    """确保 Abaqus 运行目录为纯 ASCII 路径，规避中文路径崩溃。"""
+    """确保 Abaqus 运行目录为纯 ASCII 路径，退出时退避重试删除并忽略 Windows 占用锁定。"""
     base = Path(tempfile.gettempdir())
     if str(base).isascii():
-        return TemporaryDirectory(prefix=prefix)
-    fallback = Path(os.environ.get("SystemDrive", "C:") + os.sep + "abq_tmp") if os.name == "nt" else Path("/tmp/abq_tmp")
-    fallback.mkdir(parents=True, exist_ok=True)
-    return TemporaryDirectory(dir=fallback, prefix=prefix)
+        parent = base
+    else:
+        parent = Path(os.environ.get("SystemDrive", "C:") + os.sep + "abq_tmp") if os.name == "nt" else Path("/tmp/abq_tmp")
+        parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    try:
+        yield str(tmp_path)
+    finally:
+        for delay in (0.0, 0.3, 0.8):
+            if not tmp_path.exists():
+                break
+            if delay > 0:
+                time.sleep(delay)
+            shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def run_cmd(cmd, cwd, log_path):

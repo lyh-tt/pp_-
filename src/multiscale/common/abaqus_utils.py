@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from .utils import natural_sort_key
 
@@ -92,19 +93,30 @@ def non_ascii_path_warning(path: Path) -> str | None:
     return "注意：当前输出路径包含中文或非 ASCII 字符，直接在此目录手动运行 Abaqus CAE 可能崩溃（建议仅使用英文目录，或点击“开始本机求解”自动隔离运行）。"
 
 
-def safe_ascii_temp_dir(prefix: str = "abq-") -> TemporaryDirectory[str]:
-    """返回纯 ASCII 路径的临时目录；若系统 %TEMP% 含中文，则回退到 C:\\abq_tmp。"""
+@contextmanager
+def safe_ascii_temp_dir(prefix: str = "abq-") -> Iterator[str]:
+    """返回纯 ASCII 路径的临时目录；退出时短暂退避重试删除并忽略 Windows 句柄残留锁定。"""
     system_tmp = Path(tempfile.gettempdir())
     if str(system_tmp).isascii():
-        return TemporaryDirectory(prefix=prefix)
-
-    if os.name == "nt":
-        drive = os.environ.get("SystemDrive", "C:")
-        fallback = Path(f"{drive}{os.sep}abq_tmp")
+        parent = system_tmp
     else:
-        fallback = Path("/tmp/abq_tmp")
-    fallback.mkdir(parents=True, exist_ok=True)
-    return TemporaryDirectory(dir=fallback, prefix=prefix)
+        if os.name == "nt":
+            drive = os.environ.get("SystemDrive", "C:")
+            parent = Path(f"{drive}{os.sep}abq_tmp")
+        else:
+            parent = Path("/tmp/abq_tmp")
+        parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    try:
+        yield str(tmp_path)
+    finally:
+        for delay in (0.0, 0.3, 0.8):
+            if not tmp_path.exists():
+                break
+            if delay > 0:
+                time.sleep(delay)
+            shutil.rmtree(tmp_path, ignore_errors=True)
 
 
 def detect_abaqus_command() -> str:

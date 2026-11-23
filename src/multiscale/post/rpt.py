@@ -51,10 +51,15 @@ _PROP_LINE_RE = re.compile(
     r"^\s*([A-Za-z0-9_]+)\s*:\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)\s*$"
 )
 _MODEL_META_RE = re.compile(r"^(.+?)_(\d+(?:[p.]\d+)?)(?:um)?$", re.IGNORECASE)
-_RPT_STEM_RE = re.compile(
+_RPT_PARAM_STEM_RE = re.compile(
+    r"^\d+_E(?P<e>\d+(?:p\d+)?)_CTE(?P<cte>-?\d+(?:p\d+)?)$",
+    re.IGNORECASE,
+)
+_RPT_LEGACY_STEM_RE = re.compile(
     r"^pp(?P<e>\d+(?:p\d+)?)_(?P<cte>\d+(?:p\d+)?)e_(?P<exp>\d+)(?:_\d+|_chang)?$",
     re.IGNORECASE,
 )
+_RPT_NAMED_STEM_RE = re.compile(r"^\d+_(?P<name>[A-Za-z0-9][A-Za-z0-9_-]*)$")
 
 
 @dataclass(frozen=True)
@@ -145,15 +150,30 @@ def _parse_model_meta(model_name: str) -> tuple[str, float | None]:
     return fabric, thickness
 
 
-def _parse_rpt_stem_meta(stem: str) -> tuple[float | None, float | None]:
-    match = _RPT_STEM_RE.match(stem.strip())
-    if not match:
-        return None, None
-    e_mpa = clean_float(float(match.group("e").replace("p", ".")) * 1000.0)
-    cte_coeff = float(match.group("cte").replace("p", "."))
-    exp = int(match.group("exp"))
-    cte_ppm = clean_float(cte_coeff * (10.0 ** (-exp)) * 1e6)
-    return e_mpa, cte_ppm
+def _parse_rpt_stem_meta(stem: str) -> tuple[str, float | None, float | None]:
+    clean = stem.strip()
+    # 1) 方案 A 无牌号回退格式：001_E4604p51_CTE6p04967
+    m_param = _RPT_PARAM_STEM_RE.match(clean)
+    if m_param:
+        e_mpa = clean_float(float(m_param.group("e").replace("p", ".")))
+        cte_ppm = clean_float(float(m_param.group("cte").replace("p", ".")) * 10.0)
+        return "", e_mpa, cte_ppm
+
+    # 2) 旧版兼容格式：pp4p60451_6p04967e_5
+    m_legacy = _RPT_LEGACY_STEM_RE.match(clean)
+    if m_legacy:
+        e_mpa = clean_float(float(m_legacy.group("e").replace("p", ".")) * 1000.0)
+        cte_coeff = float(m_legacy.group("cte").replace("p", "."))
+        exp = int(m_legacy.group("exp"))
+        cte_ppm = clean_float(cte_coeff * (10.0 ** (-exp)) * 1e6)
+        return "", e_mpa, cte_ppm
+
+    # 3) 方案 A 带牌号格式：001_S8NE
+    m_named = _RPT_NAMED_STEM_RE.match(clean)
+    if m_named:
+        return m_named.group("name"), None, None
+
+    return "", None, None
 
 
 def discover_rpt_files(root_dir: Path) -> list[Path]:
@@ -175,14 +195,18 @@ def _build_fiber_lookup(fiber_csv: Path | None) -> dict[str, FiberBundleRow]:
     if fiber_csv is None:
         return {}
     rows = read_fiber_bundle_csv(fiber_csv)
+    pad_width = max(3, len(str(len(rows))))
     lookup: dict[str, FiberBundleRow] = {}
     used: dict[str, int] = {}
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
+        lookup[row.task_stem(idx, pad_width=pad_width)] = row
+        lookup.setdefault(row.task_stem(idx, pad_width=3), row)
+
         stem = row.rpt_stem()
         seen = used.get(stem, 0) + 1
         used[stem] = seen
         job_name = stem if seen == 1 else f"{stem}_{seen}"
-        lookup[job_name] = row
+        lookup.setdefault(job_name, row)
         lookup.setdefault(stem, row)
     return lookup
 
@@ -220,8 +244,7 @@ def summarize_rpt_dir(
             resin_nu: float | None = clean_float(matched.poisson)
             resin_cte_ppm: float | None = clean_float(matched.cte_e5 * 10.0)
         else:
-            resin = ""
-            resin_e_mpa, resin_cte_ppm = _parse_rpt_stem_meta(rpt_path.stem)
+            resin, resin_e_mpa, resin_cte_ppm = _parse_rpt_stem_meta(rpt_path.stem)
             resin_nu = None
 
         rows.append(

@@ -139,6 +139,21 @@ def test_step3_bundle_csv_build_export_and_legacy_compat(tmp_path: Path) -> None
         "pp4p60451_6p04967e_5",
         "pp4p03056_5p27133e_5",
     ]
+    assert [row.task_stem(i) for i, row in enumerate(rows, start=1)] == [
+        "001_S8NE",
+        "002_H350",
+    ]
+    assert rows[0].task_stem(12, pad_width=4) == "0012_S8NE"
+    assert FiberBundleRow(
+        "", 4604.51, 6.04967, 0.38,
+        57278.0, 32805.0, 32773.0, 0.244, 0.244, 0.398,
+        14845.0, 14845.0, 15962.0, 8.81e-6, 3.19e-5, 3.21e-5,
+    ).task_stem(1) == "001_E4604p51_CTE6p04967"
+    assert FiberBundleRow(
+        "环氧树脂A", 4030.56, 5.27133, 0.40,
+        56023.0, 9621.0, 9523.0, 0.234, 0.235, 0.545,
+        4955.0, 4955.0, 7682.0, -4.31e-6, 2.09e-5, 2.15e-5,
+    ).task_stem(2) == "002_E4030p56_CTE5p27133"
     for row in rows:
         assert RPT_NAME_RE.match(row.rpt_stem() + ".rpt")
 
@@ -217,16 +232,16 @@ def test_step4_discovery_inp_patching_and_zero_residue_batch(tmp_path: Path) -> 
     assert summary.succeeded == 4
     assert summary.failed == 0
 
-    # Verify ONLY clean <model>/<job>.rpt files exist in rpt_out (zero ODB/INP/temp clutter).
+    # Verify ONLY clean <model>/<seq>_<name>.rpt files exist in rpt_out (zero ODB/INP/temp clutter).
     produced = sorted(p.relative_to(rpt_out).as_posix() for p in rpt_out.rglob("*") if p.is_file())
     assert produced == [
-        "PP1080_80/pp4p03056_5p27133e_5.rpt",
-        "PP1080_80/pp4p60451_6p04967e_5.rpt",
-        "PP1080_89/pp4p03056_5p27133e_5.rpt",
-        "PP1080_89/pp4p60451_6p04967e_5.rpt",
+        "PP1080_80/001_S8NE.rpt",
+        "PP1080_80/002_H350.rpt",
+        "PP1080_89/001_S8NE.rpt",
+        "PP1080_89/002_H350.rpt",
     ]
     assert "MAT0_ELASTIC=4.604510E+09, 0.36" in (
-        rpt_out / "PP1080_80" / "pp4p60451_6p04967e_5.rpt"
+        rpt_out / "PP1080_80" / "001_S8NE.rpt"
     ).read_text(encoding="utf-8")
 
     # Second run skips existing RPTs (resume_existing=True).

@@ -82,7 +82,7 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         # Tab 1：解析样本 .rpt 并导出汇总 CSV
         sample_rpt_dir = window.workspace.layout.rpt_dir / "PP1080_83p5"
         sample_rpt_dir.mkdir(parents=True, exist_ok=True)
-        (sample_rpt_dir / "pp4p60451_6p04967e_5.rpt").write_text(
+        (sample_rpt_dir / "001_S8NE.rpt").write_text(
             "Effective material properties:\n"
             "E1: 1.6928e+10\nv12: 0.1215\nv13: 0.2096\n"
             "E2: 1.8713e+10\nv21: 0.1343\nv23: 0.2058\n"

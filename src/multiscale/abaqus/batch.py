@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from ..common.abaqus_utils import (
     safe_ascii_temp_dir,
 )
 from ..common.resources import package_resource
-from ..common.utils import natural_sort_key
+from ..common.utils import format_number, natural_sort_key
 from ..fiber.bundle import FiberBundleRow
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "detect_abaqus_command",
     "discover_texgen_models",
     "export_standalone_runner",
+    "format_duration",
     "patch_texgen_inp",
     "plan_abaqus_tasks",
     "run_abaqus_batch",
@@ -79,6 +81,12 @@ class AbaqusTask:
     row: FiberBundleRow
     job_name: str
     output_rpt: Path
+    task_index: int = 1
+    total_tasks: int = 1
+    model_index: int = 1
+    total_models: int = 1
+    resin_index: int = 1
+    total_resins: int = 1
 
 
 @dataclass(frozen=True)
@@ -86,6 +94,7 @@ class TaskResult:
     task: AbaqusTask
     status: str  # "succeeded" | "skipped" | "failed" | "cancelled"
     message: str = ""
+    elapsed_sec: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,28 @@ class BatchSummary:
     failed: int
     cancelled: int
     results: tuple[TaskResult, ...]
+
+
+def format_duration(seconds: float) -> str:
+    """将秒数格式化为简洁耗时标签（如 42s / 4m12s / 1h05m）。"""
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, rem_mins = divmod(minutes, 60)
+    return f"{hours}h{rem_mins:02d}m"
+
+
+_format_duration = format_duration
+
+
+def _resin_tag(task: AbaqusTask) -> str:
+    width = max(3, len(str(task.total_resins)))
+    seq = f"#{task.resin_index:0{width}d}"
+    name = task.row.resin_name.strip()
+    return f"{seq} {name}" if name else seq
 
 
 def _inspect_model_dir(folder: Path, model_name: str) -> TexGenModel | None:
@@ -246,11 +277,18 @@ def plan_abaqus_tasks(
         raise ValueError("纤维束 CSV 中没有有效的材料行。")
 
     out_root = Path(output_dir).resolve()
+    total_models = len(models)
+    total_resins = len(rows)
+    total_tasks = total_models * total_resins
+    pad_width = max(3, len(str(total_resins)))
+
     tasks: list[AbaqusTask] = []
-    for model in models:
+    task_index = 0
+    for m_idx, model in enumerate(models, start=1):
         used_stems: dict[str, int] = {}
-        for row in rows:
-            stem = row.rpt_stem()
+        for r_idx, row in enumerate(rows, start=1):
+            task_index += 1
+            stem = row.task_stem(r_idx, pad_width=pad_width)
             seen = used_stems.get(stem, 0) + 1
             used_stems[stem] = seen
             job_name = stem if seen == 1 else f"{stem}_{seen}"
@@ -260,6 +298,12 @@ def plan_abaqus_tasks(
                     row=row,
                     job_name=job_name,
                     output_rpt=out_root / model.name / f"{job_name}.rpt",
+                    task_index=task_index,
+                    total_tasks=total_tasks,
+                    model_index=m_idx,
+                    total_models=total_models,
+                    resin_index=r_idx,
+                    total_resins=total_resins,
                 )
             )
     return tasks
@@ -277,27 +321,51 @@ def run_single_task(
     post_template: Template | None = None,
     cancel_event: threading.Event | None = None,
     on_log: Callable[[str], None] | None = None,
+    on_start: Callable[[AbaqusTask], None] | None = None,
 ) -> TaskResult:
-    label = f"{task.model.name}/{task.job_name}"
     if cancel_event is not None and cancel_event.is_set():
         return TaskResult(task, "cancelled", "已取消")
 
+    pos = f"{task.task_index}/{task.total_tasks}"
+    resin_tag = _resin_tag(task)
+
+    if task.resin_index == 1 and on_log is not None:
+        on_log(
+            f"=== 模型 {task.model_index}/{task.total_models}：{task.model.name}（共 {task.total_resins} 组树脂）==="
+        )
+
     if config.resume_existing and task.output_rpt.is_file() and task.output_rpt.stat().st_size > 0:
         if on_log is not None:
-            on_log(f"[跳过] {label}（已有 RPT 结果）")
+            on_log(f"[{pos} 跳过] {task.model.name} | {resin_tag}（已有 {task.output_rpt.name}）")
         return TaskResult(task, "skipped", "已有 RPT")
+
+    if on_start is not None:
+        on_start(task)
 
     tpl = post_template or Template(
         package_resource("abaqus/templates/rve_post.py.tpl").read_text(encoding="utf-8")
     )
+    max_attempts = config.retries + 1
+    task_start = time.monotonic()
     last_error = "未知错误"
 
-    for attempt in range(1, config.retries + 2):
+    for attempt in range(1, max_attempts + 1):
         if cancel_event is not None and cancel_event.is_set():
             return TaskResult(task, "cancelled", "已取消")
-        if on_log is not None:
-            on_log(f"[求解 {attempt}/{config.retries + 1}] {label}")
 
+        if on_log is not None:
+            if attempt == 1:
+                on_log(
+                    f"[{pos} 开始] {task.model.name} | {resin_tag}"
+                    f"（E={format_number(task.row.e_mpa)} MPa, CTE={format_number(task.row.cte_e5)}e-5）"
+                )
+            else:
+                on_log(
+                    f"[{pos} 重试 {attempt}/{max_attempts}] {task.model.name} | {resin_tag}"
+                    f"（上次失败：{last_error}）"
+                )
+
+        saved_ok = False
         try:
             with safe_ascii_temp_dir(prefix="abq-work-") as tmp:
                 work_dir = Path(tmp)
@@ -372,24 +440,38 @@ def run_single_task(
 
                     task.output_rpt.parent.mkdir(parents=True, exist_ok=True)
                     with TemporaryDirectory(
-                        dir=task.output_rpt.parent, prefix=".rpt-"
+                        dir=task.output_rpt.parent,
+                        prefix=".rpt-",
+                        ignore_cleanup_errors=True,
                     ) as stage_dir:
                         staged = Path(stage_dir) / task.output_rpt.name
                         shutil.copy2(rpt_tmp, staged)
                         staged.replace(task.output_rpt)
-
-                    if on_log is not None:
-                        on_log(f"[完成] {label}")
-                    return TaskResult(task, "succeeded", str(task.output_rpt))
+                    saved_ok = True
                 finally:
                     if config.scratch_dir is not None and task_scratch.exists():
                         shutil.rmtree(task_scratch, ignore_errors=True)
         except Exception as error:
-            last_error = str(error)
+            if not saved_ok:
+                last_error = str(error)
+                continue
 
+        if saved_ok:
+            elapsed = time.monotonic() - task_start
+            if on_log is not None:
+                on_log(
+                    f"[{pos} 完成] {task.model.name} | {resin_tag}"
+                    f"（耗时 {format_duration(elapsed)}）→ {task.output_rpt.name}"
+                )
+            return TaskResult(task, "succeeded", str(task.output_rpt), elapsed_sec=elapsed)
+
+    elapsed = time.monotonic() - task_start
     if on_log is not None:
-        on_log(f"[失败] {label}：{last_error}")
-    return TaskResult(task, "failed", last_error)
+        on_log(
+            f"[{pos} 失败] {task.model.name} | {resin_tag}"
+            f"（耗时 {format_duration(elapsed)}）：{last_error}"
+        )
+    return TaskResult(task, "failed", last_error, elapsed_sec=elapsed)
 
 
 def run_abaqus_batch(
@@ -398,6 +480,7 @@ def run_abaqus_batch(
     *,
     on_progress: Callable[[int, int, TaskResult], None] | None = None,
     on_log: Callable[[str], None] | None = None,
+    on_task_start: Callable[[AbaqusTask], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> BatchSummary:
     if not tasks:
@@ -419,6 +502,7 @@ def run_abaqus_batch(
                 post_template=post_template,
                 cancel_event=cancel_event,
                 on_log=on_log,
+                on_start=on_task_start,
             ): task
             for task in tasks
         }

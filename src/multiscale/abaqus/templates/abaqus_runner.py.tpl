@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -26,6 +27,7 @@ OUTPUT_DIR = $output_dir
 ABAQUS_COMMAND = $abaqus_command
 CPUS = $cpus
 MAX_PARALLEL = $max_parallel
+MEMORY_MB = $memory_mb
 RETRIES = $retries
 RESUME_EXISTING = $resume_existing
 DEFAULT_POISSON = $default_poisson
@@ -344,6 +346,15 @@ def run_command(cmd, cwd, log_path):
         return proc.wait()
 
 
+def safe_ascii_temp_dir(prefix="abq-work-"):
+    base = Path(tempfile.gettempdir())
+    if str(base).isascii():
+        return TemporaryDirectory(prefix=prefix)
+    fallback = Path(os.environ.get("SystemDrive", "C:") + os.sep + "abq_tmp") if os.name == "nt" else Path("/tmp/abq_tmp")
+    fallback.mkdir(parents=True, exist_ok=True)
+    return TemporaryDirectory(dir=fallback, prefix=prefix)
+
+
 def run_single_task(task, args):
     out_rpt = task["output_rpt"]
     label = "%s/%s" % (task["model"]["name"], task["job_name"])
@@ -358,7 +369,7 @@ def run_single_task(task, args):
     for attempt in range(1, args.retries + 2):
         log("[RUN %d/%d] %s" % (attempt, args.retries + 1, label))
         try:
-            with TemporaryDirectory(prefix="abq-work-") as tmp:
+            with safe_ascii_temp_dir(prefix="abq-work-") as tmp:
                 work_dir = Path(tmp)
                 aux_map = {}
                 shutil.copy2(model["ori"], work_dir / (job_name + ".ori"))
@@ -380,10 +391,14 @@ def run_single_task(task, args):
                         "job=" + job_name,
                         "input=" + job_name + ".inp",
                         "cpus=" + str(args.cpus),
+                    ]
+                    if args.memory > 0:
+                        solve_cmd.append("memory=%dmb" % args.memory)
+                    solve_cmd.extend([
                         "scratch=" + str(task_scratch),
                         "ask_delete=OFF",
                         "interactive",
-                    ]
+                    ])
                     rc = run_command(solve_cmd, work_dir, work_dir / "solve.log")
                     if rc != 0:
                         last_error = "Abaqus exited with code %d" % rc
@@ -438,6 +453,7 @@ def main():
     parser.add_argument("--abaqus", default=ABAQUS_COMMAND)
     parser.add_argument("--cpus", type=int, default=CPUS)
     parser.add_argument("--parallel", type=int, default=MAX_PARALLEL)
+    parser.add_argument("--memory", type=int, default=MEMORY_MB, help="Per-job memory limit in MB (0 = Abaqus default)")
     parser.add_argument("--retries", type=int, default=RETRIES)
     parser.add_argument("--no-resume", dest="resume", action="store_false", default=RESUME_EXISTING)
     parser.add_argument("--default-poisson", type=float, default=DEFAULT_POISSON)

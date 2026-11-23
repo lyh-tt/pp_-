@@ -8,8 +8,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
-from ..fiber_rve import default_sample_resin_csv, read_resin_csv
-from ..resources import is_frozen, package_resource
+from ..common.resources import is_frozen, package_resource
+from ..fiber.rve import default_sample_resin_csv, read_resin_csv
 from .window import ToolboxWindow
 
 
@@ -91,6 +91,27 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         runner_path = abaqus_page.export_script_to(tmp_root / "run_abaqus_batch.py")
         abaqus_runner_exported = runner_path.is_file()
 
+        # Step 5 self-check: parse sample .rpt and export summary CSV.
+        window.select_module("rpt_post")
+        rpt_page = window.page("rpt_post")
+        sample_rpt_dir = tmp_root / "rpt_check" / "PP1080_83p5"
+        sample_rpt_dir.mkdir(parents=True, exist_ok=True)
+        (sample_rpt_dir / "pp4p60451_6p04967e_5.rpt").write_text(
+            "Effective material properties:\n"
+            "E1: 1.6928e+10\nv12: 0.1215\nv13: 0.2096\n"
+            "E2: 1.8713e+10\nv21: 0.1343\nv23: 0.2058\n"
+            "E3: 8.2307e+09\nv31: 0.1019\nv32: 0.0905\n"
+            "G23: 3.2066e+09\nG31: 3.2481e+09\nG12: 4.8510e+09\n"
+            "CTE_1: 1.7132e-05\nCTE_2: 1.5303e-05\nCTE_3: 4.2350e-05\n",
+            encoding="utf-8",
+        )
+        rpt_page.load_rpt_dir(sample_rpt_dir.parent)
+        rpt_page.load_fiber_csv(bundle_csv)
+        summary_csv = rpt_page.generate()
+        rpt_summary_exported = summary_csv is not None and summary_csv.is_file()
+        if not rpt_summary_exported:
+            raise RuntimeError(f"RPT summary self-check failed: {rpt_page.notice.text()}")
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "frozen": is_frozen(),
@@ -101,6 +122,7 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         "texgen_generated": texgen_generated,
         "bundle_generated": bundle_generated,
         "abaqus_runner_exported": abaqus_runner_exported,
+        "rpt_summary_exported": rpt_summary_exported,
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     window.close()

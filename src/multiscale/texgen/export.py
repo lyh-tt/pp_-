@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from .resources import package_resource
+from ..common.resources import package_resource
 from .workflow import (
     PLACEHOLDER_MATRIX_PROPERTIES,
     PLACEHOLDER_YARN_PROPERTIES,
@@ -45,7 +45,7 @@ def export_batch(batch: ModelingBatch, parent: Path) -> Path:
         },
         "cases": cases,
     }
-    template = Template(package_resource("batch.py.tpl").read_text(encoding="utf-8"))
+    template = Template(package_resource("texgen/templates/batch.py.tpl").read_text(encoding="utf-8"))
     script = template.substitute(batch=pformat(script_data, sort_dicts=False))
     compile(script, SCRIPT_NAME, "exec")
 

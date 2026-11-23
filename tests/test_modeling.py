@@ -8,11 +8,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from texgen.export import export_batch
-from texgen.geometry import PlainWeave, calculate_geometry
-from texgen.ui.texgen_page import TexGenPage
-from texgen.ui.window import ToolboxWindow
-from texgen.workflow import (
+from multiscale.texgen.export import export_batch
+from multiscale.texgen.geometry import PlainWeave, calculate_geometry
+from multiscale.texgen.workflow import (
     PLACEHOLDER_MATRIX_PROPERTIES,
     PLACEHOLDER_YARN_PROPERTIES,
     CaseInput,
@@ -20,6 +18,8 @@ from texgen.workflow import (
     prepare_batch,
     resolve_thicknesses,
 )
+from multiscale.ui.pages.texgen_page import TexGenPage
+from multiscale.ui.window import ToolboxWindow
 
 
 def _qt_app() -> QApplication:

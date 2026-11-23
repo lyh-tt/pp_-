@@ -107,7 +107,7 @@ class ToolboxWindow(QWidget):
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(16, 12, 16, 14)
         footer_layout.addWidget(
-            label("按微观 → 细观 → 求解顺序排列，支持按模块接口逐步接入。", "SidebarFootNote", wrap=True)
+            label("按微观 → 细观 → 求解 → 汇总顺序排列，支持按模块独立使用。", "SidebarFootNote", wrap=True)
         )
         layout.addWidget(footer)
         return sidebar

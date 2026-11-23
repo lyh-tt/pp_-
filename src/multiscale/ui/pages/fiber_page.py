@@ -1,7 +1,8 @@
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLineEdit,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -22,8 +24,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..fiber_rve import (
-    FiberGenerationResult,
+from ...common.abaqus_utils import detect_abaqus_command, non_ascii_path_warning
+from ...common.resources import is_frozen
+from ...common.utils import format_number
+from ...fiber.rve import (
     FiberTemplate,
     ResinProperty,
     default_fiber_templates_root,
@@ -31,12 +35,12 @@ from ..fiber_rve import (
     discover_fiber_templates,
     generate_fiber_cases,
     parse_resin_text,
+    plan_fiber_output_dirs,
     read_resin_csv,
     write_sample_resin_csv,
 )
-from ..resources import is_frozen
-from ..workflow import format_number
-from .widgets import card_layout, label
+from ...fiber.solver import FiberBatchSummary, FiberSolveConfig, run_fiber_solve_batch
+from ..widgets import card_layout, label
 
 
 class FiberTemplateSelector(QFrame):
@@ -445,11 +449,51 @@ class ResinTableEditor(QFrame):
             self.set_resins(dialog.parsed, replace=dialog.replace_existing)
 
 
+class _FiberSolveWorker(QThread):
+    progress_changed = Signal(int, int, str)
+    finished_summary = Signal(object)
+    failed_error = Signal(str)
+
+    def __init__(
+        self,
+        templates: list[FiberTemplate],
+        resins: list[ResinProperty],
+        output_parent: Path,
+        batch_name: str,
+        config: FiberSolveConfig,
+        cancel_event: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._templates = templates
+        self._resins = resins
+        self._output_parent = output_parent
+        self._batch_name = batch_name
+        self._config = config
+        self._cancel_event = cancel_event
+
+    def run(self) -> None:
+        try:
+            summary = run_fiber_solve_batch(
+                self._templates,
+                self._resins,
+                self._output_parent,
+                self._batch_name,
+                self._config,
+                on_progress=lambda done, total, msg: self.progress_changed.emit(done, total, msg),
+                cancel_event=self._cancel_event,
+            )
+            self.finished_summary.emit(summary)
+        except Exception as error:
+            self.failed_error.emit(str(error))
+
+
 class FiberRvePage(QWidget):
     def __init__(self, default_output: Path | None = None) -> None:
         super().__init__(objectName="FiberRvePage")
         self.settings = QSettings()
-        self.last_results: list[FiberGenerationResult] = []
+        self.last_results: list[object] = []
+        self._worker: _FiberSolveWorker | None = None
+        self._cancel_event = threading.Event()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -474,7 +518,7 @@ class FiberRvePage(QWidget):
         titles.addWidget(label("1. Fiber 微观建模", "PageTitle"))
         titles.addWidget(
             label(
-                "按单丝直径分组选择 RVE 模板，批量替换树脂 E / CTE / 泊松比并生成求解目录",
+                "勾选直径模板与树脂参数，支持默认 7 方向并行求解并自动产出纤维束 CSV",
                 "PageSubtitle",
             )
         )
@@ -542,14 +586,29 @@ class FiberRvePage(QWidget):
         self.batch_name.setAccessibleName("Fiber 批次名称")
         batch_row.addWidget(self.batch_name, 1)
 
-        generate = QPushButton("生成 Fiber RVE 文件", objectName="Primary")
-        generate.clicked.connect(self._generate)
-        batch_row.addWidget(generate)
+        self.generate_btn = QPushButton("生成求解文件")
+        self.generate_btn.clicked.connect(self._generate)
+        batch_row.addWidget(self.generate_btn)
+
+        self.stop_btn = QPushButton("停止求解")
+        self.stop_btn.hide()
+        self.stop_btn.clicked.connect(self._stop_solve)
+        batch_row.addWidget(self.stop_btn)
+
+        self.solve_btn = QPushButton("开始本机求解", objectName="Primary")
+        self.solve_btn.clicked.connect(self._start_solve)
+        batch_row.addWidget(self.solve_btn)
         layout.addLayout(batch_row)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
 
         status_row = QHBoxLayout()
         self.notice = label(
-            "勾选至少一个 Fiber 模板并填写树脂参数后，即可生成计算目录。",
+            "勾选 Fiber 模板并填写树脂参数后，可直接本机 7 方向并行求解或导出求解文件。",
             "Notice",
             wrap=True,
         )
@@ -648,9 +707,106 @@ class FiberRvePage(QWidget):
         self.last_results = results
         self.result.show()
         names = "、".join(item.output_dir.name for item in results)
-        self._notify(
-            f"已生成 {len(results)} 个 Fiber RVE 计算目录（共 {len(resins)} 组树脂）：{names}"
+        msg = f"已生成 {len(results)} 个 Fiber 求解目录（附 7 方向并行脚本，共 {len(resins)} 组树脂）：{names}"
+        warn = non_ascii_path_warning(Path(self.output_path.text()))
+        if warn:
+            msg = f"{msg}\n{warn}"
+        self._notify(msg)
+
+    def _resolve_abaqus_command(self) -> str | None:
+        saved = self.settings.value("abaqus_command", "", type=str).strip()
+        cmd = saved or detect_abaqus_command()
+        if cmd:
+            return cmd
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "请选择 Abaqus 启动命令（如 abq2026.bat / abaqus.bat）",
+            "D:/",
+            "Batch / Executable (*.bat *.cmd *.exe);;All Files (*)",
         )
+        if not path:
+            return None
+        resolved = str(Path(path))
+        self.settings.setValue("abaqus_command", resolved)
+        return resolved
+
+    def _start_solve(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        try:
+            templates = self.template_selector.selected_templates()
+            resins = self.resin_editor.resins()
+            out_parent = Path(self.output_path.text())
+            plan_fiber_output_dirs(templates, out_parent, self.batch_name.text())
+        except (OSError, ValueError) as error:
+            self._notify(str(error), error=True)
+            return
+
+        abaqus_cmd = self._resolve_abaqus_command()
+        if not abaqus_cmd:
+            self._notify("未找到 Abaqus 启动命令，已取消本机求解。", error=True)
+            return
+
+        # 默认 7 方向同时并发提交，总内存上限自动控制 <= 总物理内存 90%
+        config = FiberSolveConfig(abaqus_command=abaqus_cmd)
+        total_ticks = len(templates) * 7
+        self._cancel_event.clear()
+        self.progress.setRange(0, total_ticks)
+        self.progress.setValue(0)
+        self.progress.setFormat(f"%v / {total_ticks}")
+        self._set_running(True)
+        self._notify(f"正在 7 方向并行求解（{len(templates)} 个模板，总内存自动控制 ≤ 90%）…")
+
+        self._worker = _FiberSolveWorker(
+            templates,
+            resins,
+            out_parent,
+            self.batch_name.text(),
+            config,
+            self._cancel_event,
+        )
+        self._worker.progress_changed.connect(self._on_solve_progress)
+        self._worker.finished_summary.connect(self._on_solve_finished)
+        self._worker.failed_error.connect(self._on_solve_error)
+        self._worker.start()
+
+    def _stop_solve(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._cancel_event.set()
+            self.stop_btn.setEnabled(False)
+            self._notify("正在终止 Abaqus 子进程并清理临时目录…")
+
+    def _on_solve_progress(self, done: int, total: int, msg: str) -> None:
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(done)
+        self._notify(f"正在 7 方向并行求解（{done}/{total}）：{msg}")
+
+    def _on_solve_finished(self, summary: FiberBatchSummary) -> None:
+        self._set_running(False)
+        succeeded = [res for res in summary.results if res.status == "succeeded"]
+        if succeeded:
+            self.last_results = succeeded
+            self.result.show()
+        first_err = next((res.message for res in summary.results if res.status == "failed" and res.message), "")
+        msg = (
+            f"Fiber 并行求解完成：成功 {summary.succeeded}，失败 {summary.failed}，取消 {summary.cancelled}（共 {summary.total}）。"
+        )
+        if succeeded:
+            msg += " 已直接产出 Mechanical_constants.txt 与 *_fiber_bundle.csv。"
+        if first_err:
+            msg += f" 失败原因：{first_err}"
+        self._notify(msg, error=summary.failed > 0)
+
+    def _on_solve_error(self, message: str) -> None:
+        self._set_running(False)
+        self._notify(f"求解异常：{message}", error=True)
+
+    def _set_running(self, running: bool) -> None:
+        self.generate_btn.setEnabled(not running)
+        self.solve_btn.setEnabled(not running)
+        self.stop_btn.setVisible(running)
+        self.stop_btn.setEnabled(running)
+        self.progress.setVisible(running)
 
     def _notify(self, text: str, *, error: bool = False) -> None:
         self.notice.setStyleSheet("color: #a43d30;" if error else "")
@@ -672,3 +828,9 @@ class FiberRvePage(QWidget):
         text = "\n".join(str(item.output_dir) for item in self.last_results)
         QApplication.clipboard().setText(text)
         self._notify(f"已复制 {len(self.last_results)} 个生成目录路径。")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._cancel_event.set()
+            self._worker.wait(5000)
+        super().closeEvent(event)

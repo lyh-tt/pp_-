@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from texgen.abaqus_batch import (
+from multiscale.abaqus.batch import (
     SolveConfig,
     discover_texgen_models,
     export_standalone_runner,
@@ -20,7 +20,7 @@ from texgen.abaqus_batch import (
     plan_abaqus_tasks,
     run_abaqus_batch,
 )
-from texgen.fiber_bundle import (
+from multiscale.fiber.bundle import (
     BUNDLE_CSV_COLUMNS,
     FiberBundleRow,
     build_fiber_bundle_rows,
@@ -29,10 +29,10 @@ from texgen.fiber_bundle import (
     read_fiber_bundle_csv,
     read_mechanical_constants,
 )
-from texgen.fiber_rve import ResinProperty, write_sample_resin_csv
-from texgen.ui.abaqus_page import AbaqusBatchPage
-from texgen.ui.bundle_page import FiberBundlePage
-from texgen.ui.window import ToolboxWindow
+from multiscale.fiber.rve import ResinProperty, write_sample_resin_csv
+from multiscale.ui.pages.abaqus_page import AbaqusBatchPage
+from multiscale.ui.pages.bundle_page import FiberBundlePage
+from multiscale.ui.window import ToolboxWindow
 
 RPT_NAME_RE = re.compile(r"^pp(?P<e>[0-9p]+)_(?P<resin>[0-9p]+)e_\d+(?:_chang)?\.rpt$")
 

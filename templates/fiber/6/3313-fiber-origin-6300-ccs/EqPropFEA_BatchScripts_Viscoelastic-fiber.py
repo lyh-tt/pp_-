@@ -117,6 +117,7 @@ for frame_id in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 ###### Elastic modulus E22 ######
 inpname = 'job-E22.inp'
@@ -139,7 +140,7 @@ total_frames = len(step.frames)
 total_rows = total_frames - 1
 total_cols = 12
 nodeSet_RP5 = odb.rootAssembly.nodeSets['RP5']
-data = np.loadtxt('Mechanical_constants.txt')
+data = np.loadtxt('Mechanical_constants.txt', ndmin=2)
 for frame_id in range(1, total_frames):
     frame = step.frames[frame_id]
     row_index = frame_id - 1
@@ -217,6 +218,7 @@ for frame_id in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 ###### Elastic modulus E33 ######
 inpname = 'job-E33.inp'
@@ -238,7 +240,7 @@ step = odb.steps['Step-1']
 total_frames = len(step.frames)
 total_rows = total_frames - 1
 total_cols = 12
-data = np.loadtxt('Mechanical_constants.txt')
+data = np.loadtxt('Mechanical_constants.txt', ndmin=2)
 nodeSet_RP6 = odb.rootAssembly.nodeSets['RP6']
 for i in range(1, total_frames):
     frame = step.frames[i] 
@@ -270,6 +272,7 @@ for i in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 
 ###### Elastic modulus G12 ######
@@ -294,7 +297,7 @@ step = odb.steps['Step-1']
 total_frames = len(step.frames)
 total_rows = total_frames - 1
 total_cols = 12
-data = np.loadtxt('Mechanical_constants.txt')
+data = np.loadtxt('Mechanical_constants.txt', ndmin=2)
 nodeSet_RP4 = odb.rootAssembly.nodeSets['RP4']
 total_frames = len(odb.steps['Step-1'].frames)
 for i in range(1, total_frames):
@@ -327,6 +330,7 @@ for i in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 
 ###### Elastic modulus G13 ######
@@ -350,7 +354,7 @@ step = odb.steps['Step-1']
 total_frames = len(step.frames)
 total_rows = total_frames - 1
 total_cols = 12
-data = np.loadtxt('Mechanical_constants.txt')
+data = np.loadtxt('Mechanical_constants.txt', ndmin=2)
 nodeSet_RP5 = odb.rootAssembly.nodeSets['RP5']
 nodeSet_RP6 = odb.rootAssembly.nodeSets['RP6']
 total_frames = len(odb.steps['Step-1'].frames)
@@ -384,6 +388,7 @@ for i in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 
 
@@ -408,7 +413,7 @@ step = odb.steps['Step-1']
 total_frames = len(step.frames)
 total_rows = total_frames - 1
 total_cols = 12
-data = np.loadtxt('Mechanical_constants.txt')
+data = np.loadtxt('Mechanical_constants.txt', ndmin=2)
 nodeSet_RP6 = odb.rootAssembly.nodeSets['RP6']
 total_frames = len(odb.steps['Step-1'].frames)
 for i in range(1, total_frames):
@@ -441,6 +446,7 @@ for i in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()
 
 
 
@@ -553,3 +559,4 @@ for i in range(1, total_frames):
         )
         f_mech.write(line)
     f_mech.close()
+odb.close()

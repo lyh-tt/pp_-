@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
-import subprocess
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -14,21 +11,35 @@ from pathlib import Path
 from string import Template
 from tempfile import TemporaryDirectory
 
-from .fiber_bundle import FiberBundleRow
-from .fiber_rve import _natural_group_key
-from .resources import package_resource
+from ..common.abaqus_utils import (
+    FAIL_MARKERS,
+    SUCCESS_MARKERS,
+    check_abaqus_job_ok,
+    detect_abaqus_command,
+    memory_cli_args,
+    run_cancellable_command,
+    safe_ascii_temp_dir,
+)
+from ..common.resources import package_resource
+from ..common.utils import natural_sort_key
+from ..fiber.bundle import FiberBundleRow
 
-FAIL_MARKERS = (
-    "THE ANALYSIS HAS NOT BEEN COMPLETED",
-    "TIME INCREMENT REQUIRED IS LESS THAN THE MINIMUM SPECIFIED",
-    "TOO MANY ATTEMPTS MADE FOR THIS INCREMENT",
-    "ABAQUS/STANDARD ANALYSIS EXITED WITH AN ERROR",
-    "ABAQUS ERROR",
-)
-SUCCESS_MARKERS = (
-    "THE ANALYSIS HAS COMPLETED SUCCESSFULLY",
-    "THE ANALYSIS HAS BEEN COMPLETED",
-)
+__all__ = [
+    "AbaqusTask",
+    "BatchSummary",
+    "FAIL_MARKERS",
+    "SUCCESS_MARKERS",
+    "SolveConfig",
+    "TaskResult",
+    "TexGenModel",
+    "detect_abaqus_command",
+    "discover_texgen_models",
+    "export_standalone_runner",
+    "patch_texgen_inp",
+    "plan_abaqus_tasks",
+    "run_abaqus_batch",
+    "run_single_task",
+]
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class SolveConfig:
     retries: int = 1
     resume_existing: bool = True
     scratch_dir: Path | None = None
+    memory_mb: int | None = None
 
     def __post_init__(self) -> None:
         if not self.abaqus_command.strip():
@@ -57,6 +69,8 @@ class SolveConfig:
             raise ValueError("并行任务数须大于等于 1。")
         if self.retries < 0:
             raise ValueError("失败重试次数不能小于 0。")
+        if self.memory_mb is not None and self.memory_mb < 0:
+            raise ValueError("单任务内存上限不能小于 0。")
 
 
 @dataclass(frozen=True)
@@ -84,30 +98,12 @@ class BatchSummary:
     results: tuple[TaskResult, ...]
 
 
-def detect_abaqus_command() -> str:
-    for name in ("abq2026", "abq2024", "abq2022", "abaqus"):
-        located = shutil.which(name)
-        if located:
-            return located
-
-    search_roots = (Path("D:/abaqus"), Path("D:/ABAQUS"), Path("C:/SIMULIA"), Path("D:/SIMULIA"))
-    candidates: list[Path] = []
-    for root in search_roots:
-        if root.is_dir():
-            candidates.extend(root.glob("**/abq*.bat"))
-            candidates.extend(root.glob("**/abaqus.bat"))
-    if candidates:
-        candidates.sort(key=lambda p: _natural_group_key(str(p)), reverse=True)
-        return str(candidates[0])
-    return ""
-
-
 def _inspect_model_dir(folder: Path, model_name: str) -> TexGenModel | None:
-    inps = sorted(folder.glob("*.inp"), key=lambda p: _natural_group_key(p.name))
-    oris = sorted(folder.glob("*.ori"), key=lambda p: _natural_group_key(p.name))
+    inps = sorted(folder.glob("*.inp"), key=lambda p: natural_sort_key(p.name))
+    oris = sorted(folder.glob("*.ori"), key=lambda p: natural_sort_key(p.name))
     if not inps or not oris:
         return None
-    elds = sorted(folder.glob("*.eld"), key=lambda p: _natural_group_key(p.name))
+    elds = sorted(folder.glob("*.eld"), key=lambda p: natural_sort_key(p.name))
     return TexGenModel(
         name=model_name,
         inp_path=inps[0].resolve(),
@@ -128,7 +124,7 @@ def discover_texgen_models(root_dir: Path) -> list[TexGenModel]:
     models: list[TexGenModel] = []
     subdirs = sorted(
         (entry for entry in root.iterdir() if entry.is_dir() and not entry.name.startswith(".")),
-        key=lambda entry: _natural_group_key(entry.name),
+        key=lambda entry: natural_sort_key(entry.name),
     )
     for sub in subdirs:
         found = _inspect_model_dir(sub, sub.name)
@@ -179,15 +175,9 @@ def patch_texgen_inp(
     e_pa = row.e_mpa * 1e6
     cte_resin = row.cte_e5 * 1e-5
     elastic_vals = (
-        row.e1 * 1e6,
-        row.e2 * 1e6,
-        row.e3 * 1e6,
-        row.v12,
-        row.v13,
-        row.v23,
-        row.g12 * 1e6,
-        row.g13 * 1e6,
-        row.g23 * 1e6,
+        row.e1 * 1e6, row.e2 * 1e6, row.e3 * 1e6,
+        row.v12, row.v13, row.v23,
+        row.g12 * 1e6, row.g13 * 1e6, row.g23 * 1e6,
     )
 
     idx = 0
@@ -280,84 +270,6 @@ def _count_inp_steps(inp_path: Path) -> int:
     return len(re.findall(r"^\s*\*Step\b", text, flags=re.IGNORECASE | re.MULTILINE))
 
 
-def _check_abaqus_success(work_dir: Path, job_name: str, expected_steps: int) -> tuple[bool, str]:
-    texts: list[str] = []
-    for ext in (".sta", ".msg", ".dat", ".log"):
-        path = work_dir / f"{job_name}{ext}"
-        if path.is_file():
-            texts.append(path.read_text(encoding="utf-8", errors="ignore"))
-    upper = "\n".join(texts).upper()
-
-    for marker in FAIL_MARKERS:
-        if marker in upper:
-            return False, f"Abaqus 报错：{marker}"
-    if not any(marker in upper for marker in SUCCESS_MARKERS):
-        return False, "未在求解日志中检测到完成标志"
-
-    sta_path = work_dir / f"{job_name}.sta"
-    max_step = 0
-    if sta_path.is_file():
-        for line in sta_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            match = re.match(r"^\s*(\d+)\s+\d+\s+", line)
-            if match:
-                max_step = max(max_step, int(match.group(1)))
-    if max_step < expected_steps:
-        return False, f"求解 Step 数不足（实际 {max_step}，期望 {expected_steps}）"
-
-    odb_path = work_dir / f"{job_name}.odb"
-    if not odb_path.is_file() or odb_path.stat().st_size == 0:
-        return False, "未生成有效的 .odb 文件"
-    return True, ""
-
-
-def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    else:
-        proc.kill()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        pass
-
-
-def _run_cancellable_command(
-    cmd: list[str],
-    cwd: Path,
-    log_path: Path,
-    cancel_event: threading.Event | None,
-) -> tuple[int, bool]:
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    full_cmd = (
-        ["cmd", "/c", *cmd]
-        if (os.name == "nt" and cmd[0].lower().endswith((".bat", ".cmd")))
-        else cmd
-    )
-    with log_path.open("w", encoding="utf-8", errors="ignore") as out:
-        proc = subprocess.Popen(
-            full_cmd,
-            cwd=str(cwd),
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            creationflags=flags,
-        )
-        while True:
-            rc = proc.poll()
-            if rc is not None:
-                return rc, False
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_process_tree(proc)
-                return -1, True
-            time.sleep(0.25)
-
-
 def run_single_task(
     task: AbaqusTask,
     config: SolveConfig,
@@ -376,7 +288,7 @@ def run_single_task(
         return TaskResult(task, "skipped", "已有 RPT")
 
     tpl = post_template or Template(
-        package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+        package_resource("abaqus/templates/rve_post.py.tpl").read_text(encoding="utf-8")
     )
     last_error = "未知错误"
 
@@ -387,7 +299,7 @@ def run_single_task(
             on_log(f"[求解 {attempt}/{config.retries + 1}] {label}")
 
         try:
-            with TemporaryDirectory(prefix="abq-work-") as tmp:
+            with safe_ascii_temp_dir(prefix="abq-work-") as tmp:
                 work_dir = Path(tmp)
                 aux_map: dict[str, str] = {}
                 shutil.copy2(task.model.ori_path, work_dir / f"{task.job_name}.ori")
@@ -413,11 +325,12 @@ def run_single_task(
                         f"job={task.job_name}",
                         f"input={task.job_name}.inp",
                         f"cpus={config.cpus}",
+                        *memory_cli_args(config.memory_mb),
                         f"scratch={task_scratch}",
                         "ask_delete=OFF",
                         "interactive",
                     ]
-                    rc, cancelled = _run_cancellable_command(
+                    rc, cancelled = run_cancellable_command(
                         solve_cmd, work_dir, work_dir / "solve.log", cancel_event
                     )
                     if cancelled:
@@ -426,7 +339,9 @@ def run_single_task(
                         last_error = f"Abaqus 退出码异常（{rc}）"
                         continue
 
-                    ok, reason = _check_abaqus_success(work_dir, task.job_name, expected_steps)
+                    ok, reason = check_abaqus_job_ok(
+                        work_dir, task.job_name, expected_steps=expected_steps
+                    )
                     if not ok:
                         last_error = reason
                         continue
@@ -436,7 +351,7 @@ def run_single_task(
                         tpl.substitute(model_name=repr(task.job_name)),
                         encoding="utf-8",
                     )
-                    rc_post, cancelled = _run_cancellable_command(
+                    rc_post, cancelled = run_cancellable_command(
                         [config.abaqus_command, "cae", "noGUI=extract_rpt.py"],
                         work_dir,
                         work_dir / "post.log",
@@ -489,7 +404,7 @@ def run_abaqus_batch(
         raise ValueError("没有待执行的求解任务。")
 
     post_template = Template(
-        package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+        package_resource("abaqus/templates/rve_post.py.tpl").read_text(encoding="utf-8")
     )
     total = len(tasks)
     results: list[TaskResult] = []
@@ -538,9 +453,9 @@ def export_standalone_runner(
     if not isfinite(default_poisson) or not (-1.0 < default_poisson < 0.5):
         raise ValueError("默认树脂泊松比须介于 -1 和 0.5 之间。")
 
-    post_tpl_text = package_resource("rve_post.py.tpl").read_text(encoding="utf-8")
+    post_tpl_text = package_resource("abaqus/templates/rve_post.py.tpl").read_text(encoding="utf-8")
     runner_tpl = Template(
-        package_resource("abaqus_runner.py.tpl").read_text(encoding="utf-8")
+        package_resource("abaqus/templates/abaqus_runner.py.tpl").read_text(encoding="utf-8")
     )
     script = runner_tpl.substitute(
         models_dir=repr(str(Path(models_dir).resolve())),
@@ -553,6 +468,7 @@ def export_standalone_runner(
         resume_existing=repr(config.resume_existing),
         default_poisson=repr(default_poisson),
         scratch_dir=repr(str(config.scratch_dir.resolve()) if config.scratch_dir else ""),
+        memory_mb=repr(config.memory_mb or 0),
         post_template=repr(post_tpl_text),
     )
     target = Path(output_script).resolve()

@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PySide6.QtWidgets import QApplication, QCheckBox, QHeaderView, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QHeaderView, QLabel, QPushButton, QSpinBox
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from texgen.fiber_rve import (
+from multiscale.common.resources import app_root, is_frozen, package_resource
+from multiscale.fiber.rve import (
     BATCH_SCRIPT_NAME,
     INP_NAMES,
     REQUIRED_TEMPLATE_FILES,
@@ -28,10 +29,9 @@ from texgen.fiber_rve import (
     resin_stiffness_row,
     write_sample_resin_csv,
 )
-from texgen.resources import app_root, is_frozen, package_resource
-from texgen.ui import _run_self_check
-from texgen.ui.fiber_page import FiberRvePage, PasteResinDialog
-from texgen.ui.window import ToolboxWindow
+from multiscale.ui import _run_self_check
+from multiscale.ui.pages.fiber_page import FiberRvePage, PasteResinDialog
+from multiscale.ui.window import ToolboxWindow
 
 
 def _qt_app() -> QApplication:
@@ -180,6 +180,8 @@ def test_generate_fiber_cases_and_large_batch_fortran_resizing(tmp_path: Path) -
 
     for res in results:
         assert not (res.output_dir / "old_junk.zip").exists()
+        assert not (res.output_dir / BATCH_SCRIPT_NAME).exists()
+        assert (res.output_dir / "run_fiber_parallel.py").is_file()
         assert (res.output_dir / "resin_inputs.csv").is_file()
         table = pd.read_csv(res.output_dir / "resin_inputs.csv")
         assert len(table) == 120
@@ -258,11 +260,13 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
         page = window.page("fiber_rve")
         assert isinstance(page, FiberRvePage)
 
-        # Template paths are hidden from the user UI.
+        # Template paths and manual solver-config clutter are hidden from the Step 1 UI.
         button_texts = [btn.text() for btn in page.findChildren(QPushButton)]
         label_texts = [lbl.text() for lbl in page.findChildren(QLabel)]
         assert "更换模板库…" not in button_texts
         assert "模板库目录" not in label_texts
+        assert "7 方向并发求解与内存安全配置" not in label_texts
+        assert page.findChildren(QSpinBox) == []
         assert "示例 CSV…" in button_texts
 
         # Resin name column is compact (Interactive <= 140), while numerical columns Stretch.
@@ -290,14 +294,16 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
         assert "已选 2 个模板   /   2 组树脂" in page.summary_badge.text()
 
         page.batch_name.setText("ui_test")
-        gen_btn = page.findChild(QPushButton, "Primary")
-        assert gen_btn is not None
-        gen_btn.click()
+        page.generate_btn.click()
         app.processEvents()
 
         assert len(page.last_results) == 2
         assert (out_dir / "fiber_5um_ui_test" / "resin_inputs.csv").is_file()
+        assert (out_dir / "fiber_5um_ui_test" / "run_fiber_parallel.py").is_file()
+        assert not (out_dir / "fiber_5um_ui_test" / BATCH_SCRIPT_NAME).exists()
         assert (out_dir / "fiber_7um_ui_test" / "resin_inputs.csv").is_file()
+        assert (out_dir / "fiber_7um_ui_test" / "run_fiber_parallel.py").is_file()
+        assert not (out_dir / "fiber_7um_ui_test" / BATCH_SCRIPT_NAME).exists()
     finally:
         window.close()
         window.deleteLater()
@@ -307,11 +313,11 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
 def test_resources_frozen_and_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert not is_frozen()
     assert app_root() == Path(__file__).resolve().parents[1]
-    assert package_resource("batch.py.tpl").is_file()
+    assert package_resource("texgen/templates/batch.py.tpl").is_file()
 
     fake_mei = tmp_path / "mei"
-    (fake_mei / "texgen" / "ui").mkdir(parents=True)
-    frozen_qss = fake_mei / "texgen" / "ui" / "theme.qss"
+    (fake_mei / "multiscale" / "ui").mkdir(parents=True)
+    frozen_qss = fake_mei / "multiscale" / "ui" / "theme.qss"
     frozen_qss.write_text("/* frozen */", encoding="utf-8")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -320,8 +326,8 @@ def test_resources_frozen_and_fallback(tmp_path: Path, monkeypatch: pytest.Monke
     assert is_frozen()
     assert app_root() == fake_mei
     assert package_resource("ui/theme.qss") == frozen_qss
-    # Falls back to package_dir if a file is not present under _MEIPASS/texgen.
-    assert package_resource("batch.py.tpl").is_file()
+    # Falls back to package_dir if a file is not present under _MEIPASS/multiscale.
+    assert package_resource("texgen/templates/batch.py.tpl").is_file()
 
 
 def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:
@@ -347,6 +353,7 @@ def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:
             "texgen_generated": True,
             "bundle_generated": True,
             "abaqus_runner_exported": True,
+            "rpt_summary_exported": True,
         }
     finally:
         window.close()

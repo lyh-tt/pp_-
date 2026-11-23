@@ -12,15 +12,15 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
 )
 
-from ..geometry import PlainWeave
-from ..workflow import (
+from ...common.utils import format_number
+from ...texgen.geometry import PlainWeave
+from ...texgen.workflow import (
     CaseInput,
     ThicknessMode,
-    format_number,
     prepare_case,
     resolve_thicknesses,
 )
-from .widgets import card_layout, label
+from ..widgets import card_layout, label
 
 
 class GeometryEditor(QFrame):

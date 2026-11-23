@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..fiber_bundle import (
+from ...common.utils import format_number
+from ...fiber.bundle import (
     BUNDLE_CSV_COLUMNS,
     FiberBundleRow,
     build_fiber_bundle_rows,
@@ -26,10 +27,9 @@ from ..fiber_bundle import (
     inspect_fiber_result_dir,
     read_mechanical_constants,
 )
-from ..fiber_rve import ResinProperty, read_resin_csv
-from ..workflow import format_number
+from ...fiber.rve import ResinProperty, read_resin_csv
+from ..widgets import card_layout, initial_output_dir, label, page_header, scroll_workspace
 from .fiber_page import PasteResinDialog
-from .widgets import card_layout, initial_output_dir, label, page_header, scroll_workspace
 
 
 class FiberBundlePage(QWidget):

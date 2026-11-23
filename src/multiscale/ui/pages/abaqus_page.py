@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..abaqus_batch import (
+from ...abaqus.batch import (
     BatchSummary,
     SolveConfig,
     TaskResult,
@@ -29,8 +29,9 @@ from ..abaqus_batch import (
     plan_abaqus_tasks,
     run_abaqus_batch,
 )
-from ..fiber_bundle import FiberBundleRow, read_fiber_bundle_csv
-from .widgets import card_layout, initial_output_dir, label, page_header, scroll_workspace
+from ...fiber.bundle import FiberBundleRow, read_fiber_bundle_csv
+from ...post.rpt import export_rpt_summary_csv, summarize_rpt_dir
+from ..widgets import card_layout, initial_output_dir, label, page_header, scroll_workspace
 
 
 class _SolveWorker(QThread):
@@ -175,14 +176,22 @@ class AbaqusBatchPage(QWidget):
         opts_row.addWidget(label("CPUs", "FieldCaption"))
         self.cpus_spin = QSpinBox()
         self.cpus_spin.setRange(1, 64)
-        self.cpus_spin.setValue(2)
+        self.cpus_spin.setValue(6)
         opts_row.addWidget(self.cpus_spin)
 
         opts_row.addWidget(label("并行任务数", "FieldCaption"))
         self.parallel_spin = QSpinBox()
         self.parallel_spin.setRange(1, 32)
-        self.parallel_spin.setValue(2)
+        self.parallel_spin.setValue(1)
         opts_row.addWidget(self.parallel_spin)
+
+        opts_row.addWidget(label("单任务内存(MB)", "FieldCaption"))
+        self.memory_spin = QSpinBox()
+        self.memory_spin.setRange(0, 131072)
+        self.memory_spin.setSingleStep(1024)
+        self.memory_spin.setValue(12288)
+        self.memory_spin.setSpecialValueText("默认")
+        opts_row.addWidget(self.memory_spin)
 
         opts_row.addWidget(label("失败重试", "FieldCaption"))
         self.retries_spin = QSpinBox()
@@ -193,6 +202,10 @@ class AbaqusBatchPage(QWidget):
         self.resume_check = QCheckBox("跳过已有 RPT（断点续算）")
         self.resume_check.setChecked(True)
         opts_row.addWidget(self.resume_check)
+
+        self.auto_summary_check = QCheckBox("求解完成后自动汇总 CSV")
+        self.auto_summary_check.setChecked(True)
+        opts_row.addWidget(self.auto_summary_check)
         opts_row.addStretch()
         layout.addLayout(opts_row)
 
@@ -351,6 +364,7 @@ class AbaqusBatchPage(QWidget):
             max_parallel=self.parallel_spin.value(),
             retries=self.retries_spin.value(),
             resume_existing=self.resume_check.isChecked(),
+            memory_mb=self.memory_spin.value() or None,
         )
 
     def _refresh_summary(self) -> None:
@@ -432,6 +446,21 @@ class AbaqusBatchPage(QWidget):
             f"求解结束：成功 {summary.succeeded}，跳过 {summary.skipped}，"
             f"失败 {summary.failed}，取消 {summary.cancelled}（共 {summary.total}）。"
         )
+        if self.auto_summary_check.isChecked() and (summary.succeeded + summary.skipped) > 0:
+            try:
+                out_dir = Path(self.output_dir_edit.text())
+                csv_text = self.csv_path_edit.text().strip()
+                rows, _warnings = summarize_rpt_dir(
+                    out_dir,
+                    fiber_csv=Path(csv_text) if csv_text else None,
+                )
+                if rows:
+                    saved = export_rpt_summary_csv(
+                        rows, out_dir / "effective_properties_summary.csv"
+                    )
+                    text += f" 已自动汇总 {len(rows)} 条结果至 {saved.name}。"
+            except Exception as error:
+                text += f" 自动汇总失败：{error}"
         self._notify(text, error=summary.failed > 0)
 
     def _on_worker_error(self, message: str) -> None:

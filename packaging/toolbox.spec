@@ -4,10 +4,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
 
 datas = [
-    (str(PROJECT_ROOT / "src" / "texgen" / "batch.py.tpl"), "texgen"),
-    (str(PROJECT_ROOT / "src" / "texgen" / "rve_post.py.tpl"), "texgen"),
-    (str(PROJECT_ROOT / "src" / "texgen" / "abaqus_runner.py.tpl"), "texgen"),
-    (str(PROJECT_ROOT / "src" / "texgen" / "ui" / "theme.qss"), "texgen/ui"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "fiber" / "templates" / "fiber_post.py.tpl"), "multiscale/fiber/templates"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "fiber" / "templates" / "fiber_runner.py.tpl"), "multiscale/fiber/templates"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "texgen" / "templates" / "batch.py.tpl"), "multiscale/texgen/templates"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "abaqus" / "templates" / "rve_post.py.tpl"), "multiscale/abaqus/templates"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "abaqus" / "templates" / "abaqus_runner.py.tpl"), "multiscale/abaqus/templates"),
+    (str(PROJECT_ROOT / "src" / "multiscale" / "ui" / "theme.qss"), "multiscale/ui"),
     (str(PROJECT_ROOT / "templates" / "fiber"), "templates/fiber"),
     (str(PROJECT_ROOT / "examples" / "resin_inputs_example.csv"), "examples"),
 ]

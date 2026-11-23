@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from .fiber_rve import ResinProperty, _read_text_with_fallback
-from .workflow import clean_float, format_number
+from ..common.utils import clean_float, format_number, read_text_with_fallback
+from .rve import ResinProperty
 
 RESIN_COLUMNS = ("Resin Name", "E1MPa", "CTE/e-5", "Poisson")
 FIBER_RESULT_COLUMNS = (
@@ -57,18 +57,10 @@ class FiberBundleRow:
         if not isfinite(self.poisson) or not (-1.0 < self.poisson < 0.5):
             raise ValueError("树脂泊松比 Poisson 须介于 -1 和 0.5 之间。")
         numeric = (
-            self.e1,
-            self.e2,
-            self.e3,
-            self.v12,
-            self.v13,
-            self.v23,
-            self.g12,
-            self.g13,
-            self.g23,
-            self.cte_x,
-            self.cte_y,
-            self.cte_z,
+            self.e1, self.e2, self.e3,
+            self.v12, self.v13, self.v23,
+            self.g12, self.g13, self.g23,
+            self.cte_x, self.cte_y, self.cte_z,
         )
         if any(not isfinite(value) for value in numeric):
             raise ValueError("纤维束等效性能存在非有限数值。")
@@ -117,7 +109,7 @@ def inspect_fiber_result_dir(result_dir: Path) -> tuple[Path | None, Path | None
 
 
 def read_mechanical_constants(path: Path) -> list[tuple[float, ...]]:
-    text = _read_text_with_fallback(Path(path))
+    text = read_text_with_fallback(Path(path))
     rows: list[tuple[float, ...]] = []
     for line_no, raw_line in enumerate(text.splitlines(), start=1):
         stripped = raw_line.strip()
@@ -166,18 +158,10 @@ def build_fiber_bundle_rows(
             e_mpa=resin.e_mpa,
             cte_e5=resin.cte_e5,
             poisson=resin.poisson,
-            e1=const[0],
-            e2=const[1],
-            e3=const[2],
-            v12=const[3],
-            v13=const[4],
-            v23=const[5],
-            g12=const[6],
-            g13=const[7],
-            g23=const[8],
-            cte_x=const[9],
-            cte_y=const[10],
-            cte_z=const[11],
+            e1=const[0], e2=const[1], e3=const[2],
+            v12=const[3], v13=const[4], v23=const[5],
+            g12=const[6], g13=const[7], g23=const[8],
+            cte_x=const[9], cte_y=const[10], cte_z=const[11],
         )
         for resin, const in zip(resins, constants)
     ]
@@ -203,7 +187,7 @@ def read_fiber_bundle_csv(
     if not isfinite(default_poisson) or not (-1.0 < default_poisson < 0.5):
         raise ValueError("默认树脂泊松比须介于 -1 和 0.5 之间。")
 
-    content = _read_text_with_fallback(Path(path))
+    content = read_text_with_fallback(Path(path))
     raw_rows = [
         [cell.strip() for cell in row]
         for row in csv.reader(content.splitlines())
@@ -245,18 +229,10 @@ def read_fiber_bundle_csv(
                     e_mpa=_num("E1MPa"),
                     cte_e5=_num("CTE/e-5"),
                     poisson=poisson,
-                    e1=_num("E1"),
-                    e2=_num("E2"),
-                    e3=_num("E3"),
-                    v12=_num("V12"),
-                    v13=_num("V13"),
-                    v23=_num("V23"),
-                    g12=_num("G12"),
-                    g13=_num("G13"),
-                    g23=_num("G23"),
-                    cte_x=_num("CTE_X"),
-                    cte_y=_num("CTE_Y"),
-                    cte_z=_num("CTE_Z"),
+                    e1=_num("E1"), e2=_num("E2"), e3=_num("E3"),
+                    v12=_num("V12"), v13=_num("V13"), v23=_num("V23"),
+                    g12=_num("G12"), g13=_num("G13"), g23=_num("G23"),
+                    cte_x=_num("CTE_X"), cte_y=_num("CTE_Y"), cte_z=_num("CTE_Z"),
                 )
             )
         except ValueError as error:

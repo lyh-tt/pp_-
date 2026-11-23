@@ -14,10 +14,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..export import export_batch
-from ..workflow import VOXELS, prepare_batch
-from .editor import GeometryEditor, ThicknessCaseEditor
-from .widgets import label
+from ...texgen.export import export_batch
+from ...texgen.workflow import VOXELS, prepare_batch
+from ..widgets import label
+from .texgen_editor import GeometryEditor, ThicknessCaseEditor
 
 
 class TexGenPage(QWidget):

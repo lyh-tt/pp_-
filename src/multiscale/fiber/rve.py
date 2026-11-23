@@ -13,8 +13,8 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from .resources import app_root
-from .workflow import clean_float
+from ..common.resources import app_root
+from ..common.utils import clean_float, natural_sort_key, read_text_with_fallback
 
 STIFFNESS_NAMES = ("D11", "D12", "D13", "D22", "D23", "D33", "D44", "D55", "D66")
 CTE_NAMES = ("CTE_X", "CTE_Y", "CTE_Z")
@@ -36,7 +36,8 @@ REQUIRED_TEMPLATE_FILES = (
     UMAT_CTE_SUBROUTINE,
     *INP_NAMES,
 )
-ALLOWED_COPY_SUFFIXES = {".inp", ".f", ".py"}
+# 生成计算目录时只拷贝纯求解必需文件（.inp 与 .f），不再拷贝旧串行脚本
+ALLOWED_COPY_SUFFIXES = {".inp", ".f"}
 
 
 @dataclass(frozen=True)
@@ -106,19 +107,6 @@ def write_sample_resin_csv(path: Path) -> Path:
     return target
 
 
-def _natural_group_key(text: str) -> tuple[tuple[int, int | str], ...]:
-    parts = re.split(r"(\d+)", text)
-    key: list[tuple[int, int | str]] = []
-    for part in parts:
-        if not part:
-            continue
-        if part.isdigit():
-            key.append((0, int(part)))
-        else:
-            key.append((1, part.lower()))
-    return tuple(key)
-
-
 def _is_valid_template_dir(directory: Path) -> bool:
     return directory.is_dir() and all(
         (directory / filename).is_file() for filename in REQUIRED_TEMPLATE_FILES
@@ -145,7 +133,7 @@ def discover_fiber_templates(templates_root: Path) -> list[FiberTemplate]:
     found: list[FiberTemplate] = []
     group_dirs = sorted(
         (entry for entry in root.iterdir() if entry.is_dir()),
-        key=lambda entry: _natural_group_key(entry.name),
+        key=lambda entry: natural_sort_key(entry.name),
     )
     for group_dir in group_dirs:
         if _is_valid_template_dir(group_dir):
@@ -157,7 +145,7 @@ def discover_fiber_templates(templates_root: Path) -> list[FiberTemplate]:
                     for sub in group_dir.iterdir()
                     if sub.is_dir() and _is_valid_template_dir(sub)
                 ),
-                key=lambda entry: _natural_group_key(entry.name),
+                key=lambda entry: natural_sort_key(entry.name),
             )
 
         for template_dir in candidate_dirs:
@@ -292,9 +280,7 @@ def parse_resin_text(text: str) -> list[ResinProperty]:
         tokens = _split_line_tokens(line)
         if line_no == 1 and _looks_like_header(tokens):
             continue
-        if len(tokens) == 3:
-            results.append(_resin_from_sequence(tokens, len(results) + 1))
-        elif len(tokens) == 4:
+        if len(tokens) in (3, 4):
             results.append(_resin_from_sequence(tokens, len(results) + 1))
         else:
             raise ValueError(
@@ -306,22 +292,12 @@ def parse_resin_text(text: str) -> list[ResinProperty]:
     return results
 
 
-def _read_text_with_fallback(path: Path) -> str:
-    raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
-        try:
-            return raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"无法识别文件编码：{path.name}")
-
-
 def _normalize_header(column: str) -> str:
     return re.sub(r"[\s_\-()（）/]+", "", column.strip().lower())
 
 
 def read_resin_csv(path: Path) -> list[ResinProperty]:
-    content = _read_text_with_fallback(Path(path))
+    content = read_text_with_fallback(Path(path))
     rows = [
         [cell.strip() for cell in row]
         for row in csv.reader(content.splitlines())
@@ -363,7 +339,6 @@ def read_resin_csv(path: Path) -> list[ResinProperty]:
             results.append(_resin_from_sequence((name, row[e_idx], row[cte_idx], row[v_idx]), idx))
         return results
 
-    # Fallback: headerless CSV (or unrecognized header handled by parse_resin_text).
     return parse_resin_text(content)
 
 
@@ -494,16 +469,13 @@ def _plan_output_name(
     return f"{prefix}_{suffix}"
 
 
-def generate_fiber_cases(
+def plan_fiber_output_dirs(
     templates: list[FiberTemplate],
-    resins: list[ResinProperty],
     output_parent: Path,
     batch_name: str = "",
-) -> list[FiberGenerationResult]:
+) -> list[tuple[FiberTemplate, Path]]:
     if not templates:
         raise ValueError("请至少勾选一个 Fiber RVE 模板。")
-    if not resins:
-        raise ValueError("请填写至少一组树脂性能参数。")
 
     clean_batch = batch_name.strip()
     if clean_batch and not re.fullmatch(r"[A-Za-z0-9_.-]+", clean_batch):
@@ -535,8 +507,32 @@ def generate_fiber_cases(
                 f"目标目录已存在：{destination.name}。请更换批次名称或留空按时间自动命名。"
             )
         planned.append((template, destination))
+    return planned
+
+
+def stage_fiber_case_files(
+    template: FiberTemplate,
+    resins: list[ResinProperty],
+    staged_dir: Path,
+) -> int:
+    """将模板文件、参数化子程序、INP 和 resin_inputs.csv 写入目标目录，返回 INP 数量。"""
+    if not resins:
+        raise ValueError("请填写至少一组树脂性能参数。")
+
+    staged = Path(staged_dir)
+    staged.mkdir(parents=True, exist_ok=True)
+    for source in template.path.iterdir():
+        if source.is_file() and source.suffix.lower() in ALLOWED_COPY_SUFFIXES:
+            shutil.copy2(source, staged / source.name)
 
     stiffness_rows = [resin_stiffness_row(resin) for resin in resins]
+    write_resin_values_to_subroutine(staged / UMAT_SUBROUTINE, stiffness_rows, include_cte=False)
+    write_resin_values_to_subroutine(staged / UMAT_CTE_SUBROUTINE, stiffness_rows, include_cte=True)
+
+    inp_files = sorted(staged.glob("job-*.inp"))
+    for inp_path in inp_files:
+        update_inp_step_count(inp_path, len(resins))
+
     csv_rows = [
         {
             "Row": index,
@@ -547,29 +543,31 @@ def generate_fiber_cases(
         }
         for index, resin in enumerate(resins, start=1)
     ]
+    pd.DataFrame(csv_rows).to_csv(staged / "resin_inputs.csv", index=False, encoding="utf-8-sig")
+    return len(inp_files)
+
+
+def generate_fiber_cases(
+    templates: list[FiberTemplate],
+    resins: list[ResinProperty],
+    output_parent: Path,
+    batch_name: str = "",
+) -> list[FiberGenerationResult]:
+    from .solver import RUNNER_SCRIPT_NAME, export_fiber_runner
+
+    if not resins:
+        raise ValueError("请填写至少一组树脂性能参数。")
+    parent = Path(output_parent).resolve()
+    planned = plan_fiber_output_dirs(templates, parent, batch_name)
 
     results: list[FiberGenerationResult] = []
     for template, destination in planned:
         with TemporaryDirectory(dir=parent, prefix=".pp-fiber-") as temporary:
             staged = Path(temporary) / destination.name
-            staged.mkdir()
-            for source in template.path.iterdir():
-                if source.is_file() and source.suffix.lower() in ALLOWED_COPY_SUFFIXES:
-                    shutil.copy2(source, staged / source.name)
-
-            write_resin_values_to_subroutine(
-                staged / UMAT_SUBROUTINE, stiffness_rows, include_cte=False
-            )
-            write_resin_values_to_subroutine(
-                staged / UMAT_CTE_SUBROUTINE, stiffness_rows, include_cte=True
-            )
-
-            inp_files = sorted(staged.glob("job-*.inp"))
-            for inp_path in inp_files:
-                update_inp_step_count(inp_path, len(resins))
-
-            csv_path = staged / "resin_inputs.csv"
-            pd.DataFrame(csv_rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+            inp_count = stage_fiber_case_files(template, resins, staged)
+            cell_um = template.cell_size_um or _parse_cell_size_um(template.path) or 7.12
+            # 仅写入默认 7 路并行独立脚本，不再拷贝旧串行脚本
+            export_fiber_runner(staged / RUNNER_SCRIPT_NAME, cell_size_um=cell_um)
             staged.rename(destination)
 
         results.append(
@@ -577,7 +575,7 @@ def generate_fiber_cases(
                 template=template,
                 output_dir=destination,
                 resin_count=len(resins),
-                updated_inp_count=len(inp_files),
+                updated_inp_count=inp_count,
                 csv_path=destination / "resin_inputs.csv",
             )
         )

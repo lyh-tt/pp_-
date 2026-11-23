@@ -3,8 +3,7 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Literal
 
-import numpy as np
-
+from ..common.utils import clean_float, format_number
 from .geometry import PlainWeave, WeaveGeometry, calculate_geometry
 
 VOXELS = (50, 50, 50)
@@ -55,17 +54,6 @@ class ModelingBatch:
     cases: tuple[ModelingCase, ...]
     batch_name: str = ""
     voxels: tuple[int, int, int] = VOXELS
-
-
-def clean_float(value: float) -> float:
-    cleaned = round(float(value), 10)
-    return 0.0 if cleaned == 0 else cleaned
-
-
-def format_number(value: float) -> str:
-    if not isfinite(value):
-        raise ValueError("数值必须为有限实数。")
-    return np.format_float_positional(clean_float(value), trim="-")
 
 
 def format_thickness_token(thickness_um: float) -> str:

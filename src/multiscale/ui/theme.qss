@@ -3,12 +3,59 @@ QWidget {
 }
 
 QWidget#ToolboxWindow,
+QWidget#MainArea,
 QWidget#Content,
 QScrollArea#WorkspaceScroll,
 QStackedWidget#PageStack,
+QWidget#FiberRvePage,
 QWidget#TexGenPage,
+QWidget#MesoSolvePage,
 QWidget#PlaceholderPage {
     background-color: #edf2f7;
+}
+
+QFrame#ProjectBar {
+    background-color: #f6f9fd;
+    border-bottom: 1px solid #dbe4ee;
+}
+
+QLabel#PathWarning {
+    color: #9a4d12;
+    background-color: #fff5e6;
+    border: 1px solid #f0d3a8;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+}
+
+QTabWidget#StepTabs::pane {
+    border: none;
+    background-color: #edf2f7;
+}
+
+QTabWidget#StepTabs > QTabBar {
+    background-color: #ffffff;
+    border-bottom: 1px solid #dbe4ee;
+}
+
+QTabWidget#StepTabs QTabBar::tab {
+    color: #425b76;
+    background-color: #f3f6fa;
+    border: 1px solid #dbe4ee;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 7px 16px;
+    margin-left: 8px;
+    margin-top: 6px;
+    font-weight: 600;
+}
+
+QTabWidget#StepTabs QTabBar::tab:selected {
+    color: #132b47;
+    background-color: #edf2f7;
+    border-color: #cbd9e8;
 }
 
 QFrame#Sidebar {

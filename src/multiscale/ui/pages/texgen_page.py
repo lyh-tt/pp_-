@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QSettings, QStandardPaths, QUrl
+from PySide6.QtCore import QProcess, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -17,13 +17,21 @@ from PySide6.QtWidgets import (
 from ...texgen.export import export_batch
 from ...texgen.workflow import VOXELS, prepare_batch
 from ..widgets import label
+from ..workspace import ProjectContext
 from .texgen_editor import GeometryEditor, ThicknessCaseEditor
 
 
 class TexGenPage(QWidget):
-    def __init__(self, default_output: Path | None = None) -> None:
+    def __init__(
+        self,
+        default_output: Path | None = None,
+        workspace: ProjectContext | None = None,
+        presets_path: Path | None = None,
+    ) -> None:
         super().__init__(objectName="TexGenPage")
         self.settings = QSettings()
+        self.workspace = workspace or ProjectContext(default_output, parent=self)
+        self._presets_path = presets_path
         self.script: Path | None = None
 
         root = QVBoxLayout(self)
@@ -31,10 +39,12 @@ class TexGenPage(QWidget):
         root.setSpacing(0)
         root.addWidget(self._header())
         root.addWidget(self._workspace(), 1)
-        root.addWidget(self._footer(default_output))
+        root.addWidget(self._footer())
 
         self.geometry_editor.changed.connect(self._refresh_state)
+        self.geometry_editor.preset_notice.connect(self._on_preset_notice)
         self.cases.changed.connect(self._refresh_state)
+        self.workspace.project_dir_changed.connect(self._sync_project_dir)
         self._refresh_state()
 
     def _header(self) -> QFrame:
@@ -47,7 +57,7 @@ class TexGenPage(QWidget):
         titles.addWidget(label("2. TexGen 细观建模", "PageTitle"))
         titles.addWidget(
             label(
-                "同一树脂体系下按不同总厚度/剩余树脂厚度批量生成 2 × 2 平纹单胞脚本",
+                "支持常用玻纤布预设，按总厚度/剩余树脂厚度批量生成 2 × 2 平纹单胞脚本",
                 "PageSubtitle",
             )
         )
@@ -64,7 +74,7 @@ class TexGenPage(QWidget):
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(14)
 
-        self.geometry_editor = GeometryEditor()
+        self.geometry_editor = GeometryEditor(presets_path=self._presets_path)
         self.cases = ThicknessCaseEditor()
         layout.addWidget(self.geometry_editor)
         layout.addWidget(self.cases, 1)
@@ -75,21 +85,13 @@ class TexGenPage(QWidget):
         scroll.setWidget(content)
         return scroll
 
-    def _footer(self, default_output: Path | None) -> QFrame:
+    def _footer(self) -> QFrame:
         frame = QFrame(objectName="Footer")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(24, 10, 24, 10)
         layout.setSpacing(7)
 
-        documents = QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation
-        )
-        fallback = Path(documents) if documents and Path(documents).is_dir() else Path.home()
-        if default_output is not None:
-            initial = default_output
-        else:
-            saved = self.settings.value("output_dir", str(fallback), type=str)
-            initial = Path(saved) if saved and Path(saved).is_dir() else fallback
+        initial = self.workspace.layout.texgen_dir
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -153,12 +155,17 @@ class TexGenPage(QWidget):
             self.geometry_editor.show_measure(fabric)
         self.cases.set_fabric(fabric)
 
+    def _sync_project_dir(self, _project_root: Path) -> None:
+        self.output_path.setText(str(self.workspace.layout.texgen_dir))
+
+    def _on_preset_notice(self, message: str, is_error: bool) -> None:
+        self._notify(message, error=is_error)
+
     def _choose_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择输出目录", self.output_path.text())
         if path:
             output = str(Path(path))
             self.output_path.setText(output)
-            self.settings.setValue("output_dir", output)
 
     def _generate(self) -> None:
         try:
@@ -174,8 +181,9 @@ class TexGenPage(QWidget):
             return
 
         self.result.show()
+        self.workspace.notify_texgen_dir(self.script.parent)
         self._notify(
-            f"已生成 {self.script.parent.name}（共 {len(batch.cases)} 个厚度模型）。"
+            f"已生成 {self.script.parent.name}（共 {len(batch.cases)} 个厚度模型），并已自动关联至第 3 步。"
             "请在 TexGen 中用 Python → Run Script 执行。"
         )
 

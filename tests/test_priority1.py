@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -42,8 +41,7 @@ from multiscale.post.rpt import (
     parse_rpt_file,
     summarize_rpt_dir,
 )
-from multiscale.ui.pages.abaqus_page import AbaqusBatchPage
-from multiscale.ui.pages.rpt_page import RptPostPage
+from multiscale.ui.pages.meso_page import MesoSolvePage
 from multiscale.ui.window import ToolboxWindow
 from tests.test_fiber_rve import _make_synthetic_template
 
@@ -276,8 +274,8 @@ def test_step4_memory_cli_and_safe_ui_defaults(tmp_path: Path) -> None:
     _qt_app()
     window = ToolboxWindow(default_output=tmp_path)
     try:
-        page = window.page("abaqus_batch")
-        assert isinstance(page, AbaqusBatchPage)
+        page = window.page("meso_solve")
+        assert isinstance(page, MesoSolvePage)
         assert page.cpus_spin.value() == 6
         assert page.parallel_spin.value() == 1
         assert page.memory_spin.value() == 12288
@@ -336,28 +334,21 @@ def test_step5_rpt_parsing_summary_and_ui(tmp_path: Path) -> None:
     assert len(df) == 2
 
     app = _qt_app()
-    settings = QSettings()
-    tracked = ("rpt_source_dir", "rpt_output_dir")
-    saved = {k: (settings.contains(k), settings.value(k, "", type=str)) for k in tracked}
     window = ToolboxWindow(default_output=tmp_path)
     try:
-        window.select_module("rpt_post")
-        rpt_page = window.page("rpt_post")
-        assert isinstance(rpt_page, RptPostPage)
-        rpt_page.load_rpt_dir(rpt_root)
-        rpt_page.load_fiber_csv(bundle_csv)
-        assert rpt_page.preview_table.rowCount() == 2
-        assert "已解析 2 条 RPT" in rpt_page.summary_badge.text()
+        window.select_module("meso_solve")
+        meso_page = window.page("meso_solve")
+        assert isinstance(meso_page, MesoSolvePage)
+        meso_page.load_rpt_dir(rpt_root)
+        meso_page.load_fiber_csv(bundle_csv)
+        assert meso_page.preview_table.rowCount() == 2
+        assert "已解析 2 条 RPT" in meso_page.rpt_badge.text()
 
-        exported = rpt_page.generate()
+        exported = meso_page.generate_summary()
         assert exported is not None and exported.is_file()
+        assert exported == (tmp_path / "effective_properties_summary.csv").resolve()
         assert len(pd.read_csv(exported)) == 2
     finally:
-        for k, (had, val) in saved.items():
-            if had:
-                settings.setValue(k, val)
-            else:
-                settings.remove(k)
         window.close()
         window.deleteLater()
         app.processEvents()

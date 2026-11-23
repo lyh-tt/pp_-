@@ -268,6 +268,8 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
         assert "7 方向并发求解与内存安全配置" not in label_texts
         assert page.findChildren(QSpinBox) == []
         assert "示例 CSV…" in button_texts
+        assert "合成已有 CSV…" in button_texts
+        assert Path(page.output_path.text()) == (out_dir / "01_fiber")
 
         # Resin name column is compact (Interactive <= 140), while numerical columns Stretch.
         headings = page.resin_editor.table.horizontalHeader()
@@ -297,13 +299,14 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
         page.generate_btn.click()
         app.processEvents()
 
+        fiber_out = out_dir / "01_fiber"
         assert len(page.last_results) == 2
-        assert (out_dir / "fiber_5um_ui_test" / "resin_inputs.csv").is_file()
-        assert (out_dir / "fiber_5um_ui_test" / "run_fiber_parallel.py").is_file()
-        assert not (out_dir / "fiber_5um_ui_test" / BATCH_SCRIPT_NAME).exists()
-        assert (out_dir / "fiber_7um_ui_test" / "resin_inputs.csv").is_file()
-        assert (out_dir / "fiber_7um_ui_test" / "run_fiber_parallel.py").is_file()
-        assert not (out_dir / "fiber_7um_ui_test" / BATCH_SCRIPT_NAME).exists()
+        assert (fiber_out / "fiber_5um_ui_test" / "resin_inputs.csv").is_file()
+        assert (fiber_out / "fiber_5um_ui_test" / "run_fiber_parallel.py").is_file()
+        assert not (fiber_out / "fiber_5um_ui_test" / BATCH_SCRIPT_NAME).exists()
+        assert (fiber_out / "fiber_7um_ui_test" / "resin_inputs.csv").is_file()
+        assert (fiber_out / "fiber_7um_ui_test" / "run_fiber_parallel.py").is_file()
+        assert not (fiber_out / "fiber_7um_ui_test" / BATCH_SCRIPT_NAME).exists()
     finally:
         window.close()
         window.deleteLater()
@@ -343,11 +346,10 @@ def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:
             "modules": [
                 "fiber_rve",
                 "texgen_modeling",
-                "fiber_csv_export",
-                "abaqus_batch",
-                "rpt_post",
+                "meso_solve",
             ],
             "templates": ["5", "6", "7"],
+            "fabric_presets": ["PP1080", "PP2116", "PP3313", "PP1035", "PP1027"],
             "sample_csv_count": 2,
             "fiber_generated": True,
             "texgen_generated": True,

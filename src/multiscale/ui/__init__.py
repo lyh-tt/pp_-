@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QApplication
 
 from ..common.resources import is_frozen, package_resource
 from ..fiber.rve import default_sample_resin_csv, read_resin_csv
+from ..texgen.presets import BUILTIN_FABRIC_PRESETS
+from .pages.bundle_dialog import FiberBundleDialog
 from .window import ToolboxWindow
 
 
@@ -24,13 +26,12 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
     sample_resins = read_resin_csv(default_sample_resin_csv())
 
     with TemporaryDirectory(prefix="toolbox-self-check-") as tmp:
-        tmp_root = Path(tmp)
-        fiber_out = tmp_root / "fiber_out"
-        texgen_out = tmp_root / "texgen_out"
+        project_root = Path(tmp) / "project_check"
+        window.set_project_dir(project_root)
 
+        # 第 1 步：生成 Fiber 求解目录，并测试从已有结果目录合成纤维束 CSV
         fiber_page.template_selector.select_all()
         fiber_page.resin_editor.set_resins(sample_resins, replace=True)
-        fiber_page.output_path.setText(str(fiber_out))
         fiber_page.batch_name.setText("check")
         fiber_page._generate()
         fiber_generated = bool(fiber_page.last_results) and all(
@@ -40,16 +41,33 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         if not fiber_generated:
             raise RuntimeError(f"Fiber generation self-check failed: {fiber_page.notice.text()}")
 
+        first_fiber_dir = fiber_page.last_results[0].output_dir
+        (first_fiber_dir / "Mechanical_constants.txt").write_text(
+            "\n".join(
+                "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5"
+                for _ in sample_resins
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        bundle_dlg = FiberBundleDialog(window.workspace.layout.fiber_dir, fiber_page)
+        try:
+            bundle_dlg.load_result_dir(first_fiber_dir)
+            bundle_csv = bundle_dlg.generate()
+        finally:
+            bundle_dlg.close()
+            bundle_dlg.deleteLater()
+        bundle_generated = bundle_csv is not None and bundle_csv.is_file()
+        if not bundle_generated:
+            raise RuntimeError(f"Fiber bundle CSV self-check failed: {bundle_dlg.notice.text()}")
+        window.workspace.notify_fiber_csv(bundle_csv)
+
+        # 第 2 步：选择内置 PP1080 织物预设并生成 TexGen 批量建模脚本
         window.select_module("texgen_modeling")
         texgen_page = window.page("texgen_modeling")
-        texgen_page.geometry_editor.fields["name"].setText("PP1080")
-        texgen_page.geometry_editor.fields["fabric_thickness_um"].setText("53")
-        texgen_page.geometry_editor.fields["warp_width_mm"].setText("0.269")
-        texgen_page.geometry_editor.fields["warp_spacing_mm"].setText("0.424")
-        texgen_page.geometry_editor.fields["weft_width_mm"].setText("0.269")
-        texgen_page.geometry_editor.fields["weft_spacing_mm"].setText("0.541")
+        if not texgen_page.geometry_editor.select_preset("PP1080"):
+            raise RuntimeError("Missing builtin PP1080 preset")
         texgen_page.cases.table.item(0, 1).setText("83.5")
-        texgen_page.output_path.setText(str(texgen_out))
         texgen_page.batch_suffix.setText("check")
         texgen_page._generate()
         texgen_generated = (
@@ -60,41 +78,20 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
         if not texgen_generated:
             raise RuntimeError(f"TexGen generation self-check failed: {texgen_page.notice.text()}")
 
-        # Step 3 self-check: combine resin_inputs.csv with sample Mechanical_constants.txt.
-        window.select_module("fiber_csv_export")
-        bundle_page = window.page("fiber_csv_export")
-        first_fiber_dir = fiber_page.last_results[0].output_dir
-        (first_fiber_dir / "Mechanical_constants.txt").write_text(
-            "\n".join(
-                "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5"
-                for _ in sample_resins
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        bundle_page.load_result_dir(first_fiber_dir)
-        bundle_csv = bundle_page.generate()
-        bundle_generated = bundle_csv is not None and bundle_csv.is_file()
-        if not bundle_generated:
-            raise RuntimeError(f"Fiber bundle CSV self-check failed: {bundle_page.notice.text()}")
-
-        # Step 4 self-check: load a TexGen model + bundle CSV and export standalone runner.
-        window.select_module("abaqus_batch")
-        abaqus_page = window.page("abaqus_batch")
+        # 模拟 TexGenGUI 生成 .inp/.ori 后切换到第 3 步：自动发现模型与纤维束 CSV
         model_dir = texgen_page.script.parent / "PP1080_83p5"
         (model_dir / "1.inp").write_text("*Heading\n", encoding="utf-8")
         (model_dir / "1.ori").write_text("", encoding="utf-8")
-        abaqus_page.load_models_dir(texgen_page.script.parent)
-        abaqus_page.load_fiber_csv(bundle_csv)
-        if not abaqus_page.abaqus_edit.text().strip():
-            abaqus_page.abaqus_edit.setText("abaqus")
-        runner_path = abaqus_page.export_script_to(tmp_root / "run_abaqus_batch.py")
+
+        window.select_module("meso_solve")
+        meso_page = window.page("meso_solve")
+        if not meso_page.abaqus_edit.text().strip():
+            meso_page.abaqus_edit.setText("abaqus")
+        runner_path = meso_page.export_script_to(project_root / "run_abaqus_batch.py")
         abaqus_runner_exported = runner_path.is_file()
 
-        # Step 5 self-check: parse sample .rpt and export summary CSV.
-        window.select_module("rpt_post")
-        rpt_page = window.page("rpt_post")
-        sample_rpt_dir = tmp_root / "rpt_check" / "PP1080_83p5"
+        # Tab 1：解析样本 .rpt 并导出汇总 CSV
+        sample_rpt_dir = window.workspace.layout.rpt_dir / "PP1080_83p5"
         sample_rpt_dir.mkdir(parents=True, exist_ok=True)
         (sample_rpt_dir / "pp4p60451_6p04967e_5.rpt").write_text(
             "Effective material properties:\n"
@@ -105,18 +102,18 @@ def _run_self_check(window: ToolboxWindow, report_path: Path) -> int:
             "CTE_1: 1.7132e-05\nCTE_2: 1.5303e-05\nCTE_3: 4.2350e-05\n",
             encoding="utf-8",
         )
-        rpt_page.load_rpt_dir(sample_rpt_dir.parent)
-        rpt_page.load_fiber_csv(bundle_csv)
-        summary_csv = rpt_page.generate()
+        meso_page.load_rpt_dir(window.workspace.layout.rpt_dir)
+        summary_csv = meso_page.generate_summary()
         rpt_summary_exported = summary_csv is not None and summary_csv.is_file()
         if not rpt_summary_exported:
-            raise RuntimeError(f"RPT summary self-check failed: {rpt_page.notice.text()}")
+            raise RuntimeError(f"RPT summary self-check failed: {meso_page.rpt_notice.text()}")
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {
         "frozen": is_frozen(),
         "modules": modules,
         "templates": template_groups,
+        "fabric_presets": [p.fabric.name for p in BUILTIN_FABRIC_PRESETS],
         "sample_csv_count": len(sample_resins),
         "fiber_generated": fiber_generated,
         "texgen_generated": texgen_generated,

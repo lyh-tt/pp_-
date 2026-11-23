@@ -1,7 +1,7 @@
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -41,6 +41,7 @@ from ...fiber.rve import (
 )
 from ...fiber.solver import FiberBatchSummary, FiberSolveConfig, run_fiber_solve_batch
 from ..widgets import card_layout, label
+from ..workspace import ProjectContext
 
 
 class FiberTemplateSelector(QFrame):
@@ -488,9 +489,14 @@ class _FiberSolveWorker(QThread):
 
 
 class FiberRvePage(QWidget):
-    def __init__(self, default_output: Path | None = None) -> None:
+    def __init__(
+        self,
+        default_output: Path | None = None,
+        workspace: ProjectContext | None = None,
+    ) -> None:
         super().__init__(objectName="FiberRvePage")
         self.settings = QSettings()
+        self.workspace = workspace or ProjectContext(default_output, parent=self)
         self.last_results: list[object] = []
         self._worker: _FiberSolveWorker | None = None
         self._cancel_event = threading.Event()
@@ -500,12 +506,13 @@ class FiberRvePage(QWidget):
         root.setSpacing(0)
         root.addWidget(self._header())
         root.addWidget(self._workspace(), 1)
-        root.addWidget(self._footer(default_output))
+        root.addWidget(self._footer())
 
         self.template_selector.changed.connect(self._refresh_state)
         self.resin_editor.changed.connect(self._refresh_state)
         self.resin_editor.import_requested.connect(self._choose_resin_csv)
         self.resin_editor.sample_csv_requested.connect(self._export_sample_csv)
+        self.workspace.project_dir_changed.connect(self._sync_project_dir)
         self._refresh_state()
 
     def _header(self) -> QFrame:
@@ -515,10 +522,10 @@ class FiberRvePage(QWidget):
 
         titles = QVBoxLayout()
         titles.setSpacing(3)
-        titles.addWidget(label("1. Fiber 微观建模", "PageTitle"))
+        titles.addWidget(label("1. Fiber 微观求解", "PageTitle"))
         titles.addWidget(
             label(
-                "勾选直径模板与树脂参数，支持默认 7 方向并行求解并自动产出纤维束 CSV",
+                "勾选直径模板与树脂参数，默认 7 方向并行求解并自动产出纤维束 CSV（自动联动至第 3 步）",
                 "PageSubtitle",
             )
         )
@@ -546,21 +553,13 @@ class FiberRvePage(QWidget):
         scroll.setWidget(content)
         return scroll
 
-    def _footer(self, default_output: Path | None) -> QFrame:
+    def _footer(self) -> QFrame:
         frame = QFrame(objectName="Footer")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(24, 10, 24, 10)
         layout.setSpacing(7)
 
-        documents = QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation
-        )
-        fallback = Path(documents) if documents and Path(documents).is_dir() else Path.home()
-        if default_output is not None:
-            initial = default_output
-        else:
-            saved = self.settings.value("fiber_output_dir", str(fallback), type=str)
-            initial = Path(saved) if saved and Path(saved).is_dir() else fallback
+        initial = self.workspace.layout.fiber_dir
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -585,6 +584,11 @@ class FiberRvePage(QWidget):
         )
         self.batch_name.setAccessibleName("Fiber 批次名称")
         batch_row.addWidget(self.batch_name, 1)
+
+        self.bundle_btn = QPushButton("合成已有 CSV…")
+        self.bundle_btn.setToolTip("读取已完成的 Mechanical_constants.txt 合成为纤维束 CSV")
+        self.bundle_btn.clicked.connect(self._open_bundle_dialog)
+        batch_row.addWidget(self.bundle_btn)
 
         self.generate_btn = QPushButton("生成求解文件")
         self.generate_btn.clicked.connect(self._generate)
@@ -643,6 +647,9 @@ class FiberRvePage(QWidget):
             groups = "/".join(dict.fromkeys(f"{t.group}um" for t in selected))
             self.batch_prefix.setText(f"fiber_{groups}_")
 
+    def _sync_project_dir(self, _project_root: Path) -> None:
+        self.output_path.setText(str(self.workspace.layout.fiber_dir))
+
     def _choose_output(self) -> None:
         selected = QFileDialog.getExistingDirectory(
             self, "选择 Fiber RVE 输出目录", self.output_path.text()
@@ -650,7 +657,15 @@ class FiberRvePage(QWidget):
         if selected:
             output = str(Path(selected))
             self.output_path.setText(output)
-            self.settings.setValue("fiber_output_dir", output)
+
+    def _open_bundle_dialog(self) -> None:
+        from .bundle_dialog import FiberBundleDialog
+
+        dialog = FiberBundleDialog(Path(self.output_path.text()), self)
+        dialog.exec()
+        if dialog.last_csv is not None and dialog.last_csv.is_file():
+            self.workspace.notify_fiber_csv(dialog.last_csv)
+            self._notify(f"已合成纤维束 CSV 并自动关联至第 3 步：{dialog.last_csv.name}")
 
     def _choose_resin_csv(self) -> None:
         saved_csv = self.settings.value("fiber_resin_csv", "", type=str)
@@ -787,12 +802,19 @@ class FiberRvePage(QWidget):
         if succeeded:
             self.last_results = succeeded
             self.result.show()
+            csv_targets = [
+                res.bundle_csv_path
+                for res in succeeded
+                if res.bundle_csv_path is not None and res.bundle_csv_path.is_file()
+            ]
+            if csv_targets:
+                self.workspace.notify_fiber_csv(csv_targets[-1])
         first_err = next((res.message for res in summary.results if res.status == "failed" and res.message), "")
         msg = (
             f"Fiber 并行求解完成：成功 {summary.succeeded}，失败 {summary.failed}，取消 {summary.cancelled}（共 {summary.total}）。"
         )
         if succeeded:
-            msg += " 已直接产出 Mechanical_constants.txt 与 *_fiber_bundle.csv。"
+            msg += " 已直接产出 Mechanical_constants.txt 与 *_fiber_bundle.csv，并已自动关联至第 3 步。"
         if first_err:
             msg += f" 失败原因：{first_err}"
         self._notify(msg, error=summary.failed > 0)
@@ -802,6 +824,7 @@ class FiberRvePage(QWidget):
         self._notify(f"求解异常：{message}", error=True)
 
     def _set_running(self, running: bool) -> None:
+        self.bundle_btn.setEnabled(not running)
         self.generate_btn.setEnabled(not running)
         self.solve_btn.setEnabled(not running)
         self.stop_btn.setVisible(running)

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -14,6 +16,12 @@ from PySide6.QtWidgets import (
 
 from ...common.utils import format_number
 from ...texgen.geometry import PlainWeave
+from ...texgen.presets import (
+    FabricPreset,
+    delete_user_preset,
+    list_all_presets,
+    save_user_preset,
+)
 from ...texgen.workflow import (
     CaseInput,
     ThicknessMode,
@@ -25,15 +33,35 @@ from ..widgets import card_layout, label
 
 class GeometryEditor(QFrame):
     changed = Signal()
+    preset_notice = Signal(str, bool)
 
-    def __init__(self) -> None:
+    def __init__(self, presets_path: Path | None = None) -> None:
         super().__init__()
+        self._presets_path = presets_path
+        self._presets: list[FabricPreset] = []
         layout = card_layout(self)
         heading = QHBoxLayout()
         heading.addWidget(label("织物几何", "Section"))
         heading.addStretch()
-        heading.addWidget(label("支持自由输入不同 PP 牌号与经纬几何参数", "Hint"))
+        heading.addWidget(label("支持内置/自定义常见规格一键填充，也可自由输入参数", "Hint"))
         layout.addLayout(heading)
+
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_row.addWidget(label("织物预设", "FieldCaption"))
+        self.preset_combo = QComboBox(objectName="FabricPreset")
+        self.preset_combo.setAccessibleName("织物几何预设")
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+        preset_row.addWidget(self.preset_combo, 1)
+
+        self.save_preset_btn = QPushButton("保存为预设")
+        self.save_preset_btn.clicked.connect(self._save_current_preset)
+        preset_row.addWidget(self.save_preset_btn)
+
+        self.delete_preset_btn = QPushButton("删除预设")
+        self.delete_preset_btn.clicked.connect(self._delete_current_preset)
+        preset_row.addWidget(self.delete_preset_btn)
+        layout.addLayout(preset_row)
 
         self.fields: dict[str, QLineEdit] = {}
         profile = QHBoxLayout()
@@ -84,6 +112,7 @@ class GeometryEditor(QFrame):
         layout.addLayout(grid)
         self.measure = label("", "GeometryNote", wrap=True)
         layout.addWidget(self.measure)
+        self._reload_presets()
 
     def _field(self, key: str, title: str, *, placeholder: str = "") -> QLineEdit:
         field = QLineEdit(objectName=key)
@@ -93,6 +122,74 @@ class GeometryEditor(QFrame):
         field.textChanged.connect(self.changed)
         self.fields[key] = field
         return field
+
+    def _reload_presets(self, select_name: str = "") -> None:
+        self._presets = list_all_presets(self._presets_path)
+        target_idx = 0
+        with QSignalBlocker(self.preset_combo):
+            self.preset_combo.clear()
+            self.preset_combo.addItem("— 手动输入 / 选择常用预设 —", None)
+            for idx, preset in enumerate(self._presets, start=1):
+                self.preset_combo.addItem(preset.display_label, preset)
+                if select_name and preset.fabric.name.casefold() == select_name.casefold():
+                    target_idx = idx
+            self.preset_combo.setCurrentIndex(target_idx)
+        self._update_preset_buttons()
+
+    def _update_preset_buttons(self) -> None:
+        preset = self.preset_combo.currentData()
+        self.delete_preset_btn.setEnabled(isinstance(preset, FabricPreset) and not preset.builtin)
+
+    def _on_preset_selected(self) -> None:
+        preset = self.preset_combo.currentData()
+        self._update_preset_buttons()
+        if isinstance(preset, FabricPreset):
+            self.apply_fabric(preset.fabric)
+
+    def apply_fabric(self, fabric: PlainWeave) -> None:
+        mapping = {
+            "name": fabric.name,
+            "fabric_thickness_um": format_number(fabric.fabric_thickness_um),
+            "warp_width_mm": format_number(fabric.warp_width_mm),
+            "warp_spacing_mm": format_number(fabric.warp_spacing_mm),
+            "weft_width_mm": format_number(fabric.weft_width_mm),
+            "weft_spacing_mm": format_number(fabric.weft_spacing_mm),
+        }
+        for key, text in mapping.items():
+            with QSignalBlocker(self.fields[key]):
+                self.fields[key].setText(text)
+        self.changed.emit()
+
+    def select_preset(self, name: str) -> bool:
+        for idx in range(1, self.preset_combo.count()):
+            preset = self.preset_combo.itemData(idx)
+            if isinstance(preset, FabricPreset) and preset.fabric.name.casefold() == name.casefold():
+                self.preset_combo.setCurrentIndex(idx)
+                return True
+        return False
+
+    def _save_current_preset(self) -> None:
+        try:
+            fabric = self.value()
+            save_user_preset(fabric, path=self._presets_path)
+        except (OSError, ValueError) as error:
+            self.preset_notice.emit(str(error), True)
+            return
+        self._reload_presets(select_name=fabric.name)
+        self.preset_notice.emit(f"已保存本地织物预设：{fabric.name}", False)
+
+    def _delete_current_preset(self) -> None:
+        preset = self.preset_combo.currentData()
+        if not isinstance(preset, FabricPreset) or preset.builtin:
+            return
+        name = preset.fabric.name
+        try:
+            delete_user_preset(name, path=self._presets_path)
+        except OSError as error:
+            self.preset_notice.emit(str(error), True)
+            return
+        self._reload_presets()
+        self.preset_notice.emit(f"已删除自定义预设：{name}", False)
 
     def is_blank(self) -> bool:
         return all(not field.text().strip() for field in self.fields.values())
@@ -114,16 +211,27 @@ class GeometryEditor(QFrame):
     def show_measure(self, geometry: PlainWeave | None, error: str = "") -> None:
         if geometry is not None:
             x_size, y_size = geometry.cell_size_mm
-            self.measure.setStyleSheet("")
-            self.measure.setText(
+            text = (
                 f"纱束高度：{format_number(geometry.yarn_height_um)} μm（织物厚度的一半）"
                 f"   ·   2 × 2 单胞平面尺寸：{format_number(x_size)} × {format_number(y_size)} mm"
             )
+            matched = next(
+                (
+                    p
+                    for p in self._presets
+                    if p.fabric.name.casefold() == geometry.name.casefold() and p.recommended_fiber_um
+                ),
+                None,
+            )
+            if matched is not None:
+                text += f"   ·   建议单丝模板：{matched.recommended_fiber_um} μm"
+            self.measure.setStyleSheet("")
+            self.measure.setText(text)
             return
 
         if self.is_blank():
             self.measure.setStyleSheet("")
-            self.measure.setText("请填写 PP 型号、织物厚度及经纬纱尺寸。")
+            self.measure.setText("请选择上方织物预设，或手动填写 PP 型号、织物厚度及经纬纱尺寸。")
         else:
             self.measure.setStyleSheet("color: #a43d30;")
             self.measure.setText(error)

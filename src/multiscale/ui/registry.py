@@ -4,11 +4,10 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QWidget
 
-from .pages.abaqus_page import AbaqusBatchPage
-from .pages.bundle_page import FiberBundlePage
 from .pages.fiber_page import FiberRvePage
-from .pages.rpt_page import RptPostPage
+from .pages.meso_page import MesoSolvePage
 from .pages.texgen_page import TexGenPage
+from .workspace import ProjectContext
 
 
 @dataclass(frozen=True)
@@ -42,17 +41,21 @@ class ToolRegistry:
         return self._by_id[module_id]
 
 
-def create_default_registry(default_output: Path | None = None) -> ToolRegistry:
+def create_default_registry(
+    default_output: Path | None = None,
+    workspace: ProjectContext | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
+    ctx = workspace or ProjectContext(default_output)
 
     registry.register(
         ToolModule(
             module_id="fiber_rve",
-            title="1. Fiber 微观建模",
-            subtitle="按单丝直径分组批量替换树脂性能，7 方向并行求解微观纤维束 RVE",
+            title="1. Fiber 微观求解",
+            subtitle="7 方向并行求解微观 RVE，自动产出机械常数与纤维束等效性能 CSV",
             category="",
             implemented=True,
-            factory=lambda: FiberRvePage(default_output),
+            factory=lambda: FiberRvePage(default_output, workspace=ctx),
         )
     )
 
@@ -60,43 +63,21 @@ def create_default_registry(default_output: Path | None = None) -> ToolRegistry:
         ToolModule(
             module_id="texgen_modeling",
             title="2. TexGen 细观建模",
-            subtitle="平纹织物参数化与多厚度单胞体素网格脚本生成",
+            subtitle="支持常用玻纤布预设，按厚度方案批量生成 2 × 2 平纹单胞脚本",
             category="",
             implemented=True,
-            factory=lambda: TexGenPage(default_output),
+            factory=lambda: TexGenPage(default_output, workspace=ctx),
         )
     )
 
     registry.register(
         ToolModule(
-            module_id="fiber_csv_export",
-            title="3. 纤维束 CSV 生成",
-            subtitle="读取 Mechanical_constants.txt 合并树脂输入，输出单份纤维束等效性能 CSV",
+            module_id="meso_solve",
+            title="3. 细观求解与汇总",
+            subtitle="自动联动纤维束 CSV 与几何目录，批量求解 Abaqus 并汇总等效性能 CSV",
             category="",
             implemented=True,
-            factory=lambda: FiberBundlePage(default_output),
-        )
-    )
-
-    registry.register(
-        ToolModule(
-            module_id="abaqus_batch",
-            title="4. Abaqus 批量求解",
-            subtitle="替换 TexGen INP 树脂与纤维束参数，临时目录并发求解并只保留 RPT",
-            category="",
-            implemented=True,
-            factory=lambda: AbaqusBatchPage(default_output),
-        )
-    )
-
-    registry.register(
-        ToolModule(
-            module_id="rpt_post",
-            title="5. RPT 后处理",
-            subtitle="解析介电层均质化 .rpt 结果并导出 MPa / ppm/K 汇总 CSV",
-            category="",
-            implemented=True,
-            factory=lambda: RptPostPage(default_output),
+            factory=lambda: MesoSolvePage(default_output, workspace=ctx),
         )
     )
 

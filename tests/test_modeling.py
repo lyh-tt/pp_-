@@ -173,13 +173,11 @@ def test_sidebar_toolbox_ui_and_end_to_end_generation(tmp_path: Path) -> None:
         assert module_ids == [
             "fiber_rve",
             "texgen_modeling",
-            "fiber_csv_export",
-            "abaqus_batch",
-            "rpt_post",
+            "meso_solve",
         ]
 
-        window.select_module("abaqus_batch")
-        assert window.current_module_id == "abaqus_batch"
+        window.select_module("meso_solve")
+        assert window.current_module_id == "meso_solve"
         window.select_module("texgen_modeling")
         assert window.current_module_id == "texgen_modeling"
 
@@ -191,6 +189,7 @@ def test_sidebar_toolbox_ui_and_end_to_end_generation(tmp_path: Path) -> None:
         assert "导入 CSV…" not in button_texts
         assert "单胞预览" not in label_texts
         assert "选中工况材料" not in label_texts
+        assert Path(page.output_path.text()) == (tmp_path / "02_texgen")
 
         assert page.geometry_editor.is_blank()
         assert page.batch_prefix.text() == "<PP型号>_"
@@ -231,7 +230,7 @@ def test_sidebar_toolbox_ui_and_end_to_end_generation(tmp_path: Path) -> None:
         app.processEvents()
 
         assert page.script is not None and page.script.is_file()
-        assert page.script.parent == (tmp_path / "PP2116_batch1")
+        assert page.script.parent == (tmp_path / "02_texgen" / "PP2116_batch1")
         assert not (page.script.parent / "batch.json").exists()
         assert (page.script.parent / "PP2116_120").is_dir()
         assert (page.script.parent / "PP2116_thick").is_dir()

@@ -30,8 +30,8 @@ from multiscale.fiber.bundle import (
     read_mechanical_constants,
 )
 from multiscale.fiber.rve import ResinProperty, write_sample_resin_csv
-from multiscale.ui.pages.abaqus_page import AbaqusBatchPage
-from multiscale.ui.pages.bundle_page import FiberBundlePage
+from multiscale.ui.pages.bundle_dialog import FiberBundleDialog
+from multiscale.ui.pages.meso_page import MesoSolvePage
 from multiscale.ui.window import ToolboxWindow
 
 RPT_NAME_RE = re.compile(r"^pp(?P<e>[0-9p]+)_(?P<resin>[0-9p]+)e_\d+(?:_chang)?\.rpt$")
@@ -258,16 +258,16 @@ def test_step4_discovery_inp_patching_and_zero_residue_batch(tmp_path: Path) -> 
 def test_step3_and_step4_ui_offscreen(tmp_path: Path) -> None:
     app = _qt_app()
     settings = QSettings()
-    tracked_keys = ("bundle_result_dir", "abaqus_models_dir", "abaqus_fiber_csv")
+    tracked_keys = ("bundle_result_dir",)
     saved_state = {
         key: (settings.contains(key), settings.value(key, "", type=str))
         for key in tracked_keys
     }
     window = ToolboxWindow(default_output=tmp_path)
     try:
-        # Step 3 UI: load Fiber RVE result dir and generate single CSV.
-        fiber_dir = tmp_path / "fiber_5um_demo"
-        fiber_dir.mkdir()
+        # Step 1 bundle dialog: load Fiber RVE result dir and generate single CSV.
+        fiber_dir = tmp_path / "01_fiber" / "fiber_5um_demo"
+        fiber_dir.mkdir(parents=True)
         write_sample_resin_csv(fiber_dir / "resin_inputs.csv")
         (fiber_dir / "Mechanical_constants.txt").write_text(
             "57000 27400 27500 0.24 0.24 0.41 12000 12100 14000 5e-6 1.2e-5 1.3e-5\n"
@@ -275,32 +275,35 @@ def test_step3_and_step4_ui_offscreen(tmp_path: Path) -> None:
             encoding="utf-8",
         )
 
-        window.select_module("fiber_csv_export")
-        bundle_page = window.page("fiber_csv_export")
-        assert isinstance(bundle_page, FiberBundlePage)
-        bundle_page.load_result_dir(fiber_dir)
-        assert bundle_page.preview_table.rowCount() == 2
-        assert "已匹配 2 组" in bundle_page.summary_badge.text()
+        bundle_dlg = FiberBundleDialog(window.workspace.layout.fiber_dir, window.page("fiber_rve"))
+        try:
+            bundle_dlg.load_result_dir(fiber_dir)
+            assert bundle_dlg.preview_table.rowCount() == 2
+            assert "已匹配 2 组" in bundle_dlg.summary_badge.text()
 
-        csv_out = bundle_page.generate()
-        assert csv_out is not None and csv_out.is_file()
+            csv_out = bundle_dlg.generate()
+            assert csv_out is not None and csv_out.is_file()
+        finally:
+            bundle_dlg.close()
+            bundle_dlg.deleteLater()
 
-        # Step 4 UI: load TexGen models dir + Step 3 CSV and export standalone script.
-        texgen_dir = tmp_path / "PP1080_batch"
+        # Notify upstream fiber CSV ready, then prepare TexGen models dir and verify Step 3 UI.
+        window.workspace.notify_fiber_csv(csv_out)
+        texgen_dir = tmp_path / "02_texgen" / "PP1080_batch"
         model_dir = texgen_dir / "PP1080_80"
         model_dir.mkdir(parents=True)
         (model_dir / "1.inp").write_text(_sample_inp_text(), encoding="utf-8")
         (model_dir / "1.ori").write_text("1, 1, 0, 0\n", encoding="utf-8")
 
-        window.select_module("abaqus_batch")
-        abaqus_page = window.page("abaqus_batch")
-        assert isinstance(abaqus_page, AbaqusBatchPage)
-        abaqus_page.load_models_dir(texgen_dir)
-        abaqus_page.load_fiber_csv(csv_out)
-        assert abaqus_page.summary_badge.text() == "1 模型 × 2 材料 = 2 任务"
+        window.select_module("meso_solve")
+        meso_page = window.page("meso_solve")
+        assert isinstance(meso_page, MesoSolvePage)
+        assert Path(meso_page.csv_path_edit.text()) == csv_out.resolve()
+        meso_page.load_models_dir(texgen_dir)
+        assert meso_page.summary_badge.text() == "1 模型 × 2 材料 = 2 任务"
 
-        abaqus_page.abaqus_edit.setText("abq2026")
-        runner = abaqus_page.export_script_to(tmp_path / "run_batch.py")
+        meso_page.abaqus_edit.setText("abq2026")
+        runner = meso_page.export_script_to(tmp_path / "run_batch.py")
         assert runner.is_file()
         assert "abq2026" in runner.read_text(encoding="utf-8")
     finally:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QUrl
@@ -28,15 +30,23 @@ from ...fiber.bundle import (
     read_mechanical_constants,
 )
 from ...fiber.rve import ResinProperty, read_resin_csv
-from ..widgets import card_layout, initial_output_dir, label, page_header, scroll_workspace
+from ..widgets import card_layout, initial_output_dir, label
 from .fiber_page import PasteResinDialog
 
 
-class FiberBundlePage(QWidget):
-    def __init__(self, default_output: Path | None = None) -> None:
-        super().__init__(objectName="FiberBundlePage")
+class FiberBundleDialog(QDialog):
+    """辅助弹窗：将已有 Mechanical_constants.txt 与树脂参数合成为单份纤维束 CSV。"""
+
+    def __init__(
+        self,
+        initial_dir: Path | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("从已有 Fiber 结果合成纤维束 CSV")
+        self.resize(960, 620)
         self.settings = QSettings()
-        self._default_output = default_output
+        self._default_output = Path(initial_dir).resolve() if initial_dir is not None else None
         self._constants: list[tuple[float, ...]] = []
         self._resins: list[ResinProperty] = []
         self._rows: list[FiberBundleRow] = []
@@ -46,20 +56,23 @@ class FiberBundlePage(QWidget):
 
         self.summary_badge = label("未加载数据", "MeshInfo")
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(
-            page_header(
-                "3. 纤维束 CSV 生成",
-                "读取第 1 步 Fiber RVE 求解完成的 Mechanical_constants.txt，生成单份纤维束等效性能 CSV",
-                self.summary_badge,
-            )
-        )
-        root.addWidget(
-            scroll_workspace(self._source_card(), self._preview_card()),
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(
+            label(
+                "读取离线/服务器算完的 Mechanical_constants.txt 并关联树脂输入，导出标准纤维束等效性能 CSV：",
+                "Hint",
+                wrap=True,
+            ),
             1,
         )
-        root.addWidget(self._footer(default_output))
+        header_row.addWidget(self.summary_badge)
+        root.addLayout(header_row)
+        root.addWidget(self._source_card())
+        root.addWidget(self._preview_card(), 1)
+        root.addWidget(self._footer())
 
     def _source_card(self) -> QFrame:
         card = QFrame()
@@ -100,7 +113,7 @@ class FiberBundlePage(QWidget):
         layout.addLayout(resin_row)
 
         self.input_status = label(
-            "请选择第 1 步计算完成后的 Fiber 结果目录，程序会自动匹配树脂输入与 12 列等效性能。",
+            "请选择计算完成后的 Fiber 结果目录，程序会自动匹配树脂输入与 12 列等效性能。",
             "Hint",
             wrap=True,
         )
@@ -119,7 +132,7 @@ class FiberBundlePage(QWidget):
         self.preview_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.setShowGrid(False)
-        self.preview_table.setMinimumHeight(210)
+        self.preview_table.setMinimumHeight(200)
         self.preview_table.verticalHeader().setVisible(False)
         self.preview_table.verticalHeader().setDefaultSectionSize(32)
         self.preview_table.horizontalHeader().setSectionResizeMode(
@@ -128,13 +141,13 @@ class FiberBundlePage(QWidget):
         layout.addWidget(self.preview_table, 1)
         return card
 
-    def _footer(self, default_output: Path | None) -> QFrame:
+    def _footer(self) -> QFrame:
         frame = QFrame(objectName="Footer")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(24, 10, 24, 10)
-        layout.setSpacing(7)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
-        initial_dir = initial_output_dir(self.settings, "bundle_output_dir", default_output)
+        initial_dir = initial_output_dir(self.settings, "bundle_output_dir", self._default_output)
         out_row = QHBoxLayout()
         out_row.setSpacing(8)
         out_row.addWidget(label("输出 CSV", "FieldCaption"))
@@ -168,11 +181,19 @@ class FiberBundlePage(QWidget):
             buttons.addWidget(btn)
         self.result.hide()
         status_row.addWidget(self.result)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        status_row.addWidget(close_btn)
         layout.addLayout(status_row)
         return frame
 
     def _choose_result_dir(self) -> None:
-        initial = self.settings.value("bundle_result_dir", str(Path.home()), type=str)
+        initial = str(self._default_output) if self._default_output and self._default_output.is_dir() else ""
+        if not initial and self._default_output and self._default_output.parent.is_dir():
+            initial = str(self._default_output.parent)
+        if not initial:
+            initial = self.settings.value("bundle_result_dir", str(Path.home()), type=str)
         selected = QFileDialog.getExistingDirectory(self, "选择 Fiber RVE 结果目录", initial)
         if selected:
             self.load_result_dir(Path(selected))
@@ -212,15 +233,14 @@ class FiberBundlePage(QWidget):
         elif not self._resins:
             self.resin_info.setText("未找到 resin_inputs.csv，请手动选择或粘贴树脂参数")
 
-        if self._default_output is not None:
-            target_dir = self._default_output
-        else:
-            target_dir = resolved
+        target_dir = self._default_output if self._default_output is not None else resolved
         self.output_csv_edit.setText(str(target_dir / f"{resolved.name}_fiber_bundle.csv"))
         self._rebuild_preview()
 
     def _choose_resin_csv(self) -> None:
-        initial = self.result_dir_edit.text() or str(Path.home())
+        initial = self.result_dir_edit.text() or (
+            str(self._default_output) if self._default_output else str(Path.home())
+        )
         path, _ = QFileDialog.getOpenFileName(
             self, "选择树脂参数 CSV", initial, "CSV (*.csv);;All Files (*.*)"
         )
@@ -300,12 +320,15 @@ class FiberBundlePage(QWidget):
                 format_number(row.e_mpa),
                 format_number(row.cte_e5),
                 format_number(row.poisson),
-                *(f"{val:.6g}" for val in (
-                    row.e1, row.e2, row.e3,
-                    row.v12, row.v13, row.v23,
-                    row.g12, row.g13, row.g23,
-                    row.cte_x, row.cte_y, row.cte_z,
-                )),
+                *(
+                    f"{val:.6g}"
+                    for val in (
+                        row.e1, row.e2, row.e3,
+                        row.v12, row.v13, row.v23,
+                        row.g12, row.g13, row.g23,
+                        row.cte_x, row.cte_y, row.cte_z,
+                    )
+                ),
             ]
             for col_idx, text in enumerate(values):
                 item = QTableWidgetItem(text)

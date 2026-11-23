@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -652,11 +653,17 @@ class MesoSolvePage(QWidget):
                 self._refresh_rpt_preview()
 
     def _choose_abaqus(self) -> None:
+        default_dir = "D:/" if os.name == "nt" else "/usr"
+        file_filter = (
+            "Batch / Executable (*.bat *.cmd *.exe);;All Files (*)"
+            if os.name == "nt"
+            else "All Files (*)"
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 Abaqus 命令文件",
-            self.abaqus_edit.text() or "D:/",
-            "Batch / Executable (*.bat *.cmd *.exe);;All Files (*)",
+            self.abaqus_edit.text() or default_dir,
+            file_filter,
         )
         if path:
             self.abaqus_edit.setText(str(Path(path)))

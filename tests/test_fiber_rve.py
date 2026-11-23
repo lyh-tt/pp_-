@@ -257,6 +257,7 @@ def test_fiber_rve_ui_workflow_offscreen(tmp_path: Path) -> None:
     window = ToolboxWindow(default_output=out_dir)
     try:
         assert window.current_module_id == "fiber_rve"
+        assert not window.windowIcon().isNull()
         page = window.page("fiber_rve")
         assert isinstance(page, FiberRvePage)
 
@@ -317,6 +318,8 @@ def test_resources_frozen_and_fallback(tmp_path: Path, monkeypatch: pytest.Monke
     assert not is_frozen()
     assert app_root() == Path(__file__).resolve().parents[1]
     assert package_resource("texgen/templates/batch.py.tpl").is_file()
+    assert package_resource("ui/assets/app_icon.png").is_file()
+    assert package_resource("ui/assets/app_icon.ico").is_file()
 
     fake_mei = tmp_path / "mei"
     (fake_mei / "multiscale" / "ui").mkdir(parents=True)
@@ -331,6 +334,8 @@ def test_resources_frozen_and_fallback(tmp_path: Path, monkeypatch: pytest.Monke
     assert package_resource("ui/theme.qss") == frozen_qss
     # Falls back to package_dir if a file is not present under _MEIPASS/multiscale.
     assert package_resource("texgen/templates/batch.py.tpl").is_file()
+    assert package_resource("ui/assets/app_icon.png").is_file()
+    assert package_resource("ui/assets/app_icon.ico").is_file()
 
 
 def test_self_check_report_in_dev_mode(tmp_path: Path) -> None:

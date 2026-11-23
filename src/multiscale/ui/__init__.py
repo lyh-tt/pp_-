@@ -1,4 +1,5 @@
 import argparse
+import ctypes
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from ..common.resources import is_frozen, package_resource
 from ..fiber.bundle import BUNDLE_CSV_COLUMNS
 from ..fiber.rve import default_sample_resin_csv, read_resin_csv
 from ..texgen.presets import BUILTIN_FABRIC_PRESETS
+from .widgets import load_app_icon
 from .window import ToolboxWindow
 
 
@@ -120,6 +122,15 @@ def main() -> int:
     parser.add_argument("--self-check", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if sys.platform == "win32":
+        try:
+            # 绑定独立 AppUserModelID，确保 Windows 任务栏显示自定义抽象图标而非默认 Python 图标
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(  # type: ignore[attr-defined]
+                "PPTools.MaterialMultiscaleToolbox"
+            )
+        except Exception:
+            pass
+
     app = QApplication([sys.argv[0]])
     app.setOrganizationName("PPTools")
     app.setApplicationName("MaterialMultiscaleToolbox")
@@ -127,8 +138,15 @@ def main() -> int:
     app.styleHints().setColorScheme(Qt.ColorScheme.Light)
     if sys.platform == "win32":
         app.setFont(QFont("Microsoft YaHei UI", 10))
+    else:
+        app.setDesktopFileName("multiscale-toolbox")
+
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
+
     app.setStyleSheet(package_resource("ui/theme.qss").read_text(encoding="utf-8"))
-    window = ToolboxWindow(args.output_dir)
+    window = ToolboxWindow(args.output_dir, enable_tray=(args.self_check is None))
     if args.self_check is not None:
         return _run_self_check(window, args.self_check)
     window.show()

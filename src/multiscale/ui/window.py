@@ -1,22 +1,25 @@
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QStackedWidget,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
 from ..common.abaqus_utils import non_ascii_path_warning
 from .registry import ToolModule, ToolRegistry, create_default_registry
-from .widgets import label
+from .widgets import label, load_app_icon
 from .workspace import ProjectContext
 
 
@@ -26,9 +29,15 @@ class ToolboxWindow(QWidget):
         default_output: Path | None = None,
         registry: ToolRegistry | None = None,
         workspace: ProjectContext | None = None,
+        *,
+        enable_tray: bool = True,
     ) -> None:
         super().__init__(objectName="ToolboxWindow")
         self.setWindowTitle("材料多尺度建模处理工具箱")
+        self._app_icon = load_app_icon()
+        if not self._app_icon.isNull():
+            self.setWindowIcon(self._app_icon)
+
         self.setMinimumSize(1020, 620)
         screen = self.screen().availableGeometry()
         self.resize(min(1320, screen.width() - 36), min(800, screen.height() - 42))
@@ -43,6 +52,7 @@ class ToolboxWindow(QWidget):
         self._pages: dict[str, QWidget] = {}
         self._page_indices: dict[str, int] = {}
         self._current_module_id = ""
+        self._tray_icon: QSystemTrayIcon | None = None
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -67,6 +77,35 @@ class ToolboxWindow(QWidget):
         if modules:
             default_module = next((m for m in modules if m.implemented), modules[0])
             self.select_module(default_module.module_id)
+
+        if enable_tray and not self._app_icon.isNull() and QSystemTrayIcon.isSystemTrayAvailable():
+            self._init_tray_icon()
+
+    def _init_tray_icon(self) -> None:
+        tray = QSystemTrayIcon(self._app_icon, self)
+        tray.setToolTip("材料多尺度建模处理工具箱")
+        menu = QMenu(self)
+        menu.addAction("显示主窗口", self._bring_to_front)
+        menu.addAction("退出", self.close)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray_icon = tray
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._bring_to_front()
+
+    def _bring_to_front(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _build_project_bar(self) -> QFrame:
         bar = QFrame(objectName="ProjectBar")
@@ -126,11 +165,23 @@ class ToolboxWindow(QWidget):
         layout.setSpacing(0)
 
         brand = QFrame(objectName="SidebarBrand")
-        brand_layout = QVBoxLayout(brand)
-        brand_layout.setContentsMargins(18, 20, 18, 16)
-        brand_layout.setSpacing(5)
+        brand_outer = QHBoxLayout(brand)
+        brand_outer.setContentsMargins(16, 18, 16, 16)
+        brand_outer.setSpacing(12)
+
+        if not self._app_icon.isNull():
+            logo = QLabel(objectName="SidebarLogo")
+            logo.setFixedSize(40, 40)
+            logo.setPixmap(self._app_icon.pixmap(40, 40))
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            brand_outer.addWidget(logo, 0, Qt.AlignmentFlag.AlignTop)
+
+        brand_layout = QVBoxLayout()
+        brand_layout.setContentsMargins(0, 0, 0, 0)
+        brand_layout.setSpacing(4)
         brand_layout.addWidget(label("材料多尺度建模\n处理工具箱", "SidebarTitle", wrap=True))
         brand_layout.addWidget(label("介电层跨尺度建模平台", "SidebarSubtitle", wrap=True))
+        brand_outer.addLayout(brand_layout, 1)
         layout.addWidget(brand)
 
         nav = QWidget(objectName="SidebarNav")
@@ -208,6 +259,10 @@ class ToolboxWindow(QWidget):
         return self.registry.modules()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+            self._tray_icon.deleteLater()
+            self._tray_icon = None
         for page in self._pages.values():
             page.close()
         super().closeEvent(event)

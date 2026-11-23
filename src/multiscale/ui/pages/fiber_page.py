@@ -1,3 +1,4 @@
+import os
 import threading
 from pathlib import Path
 
@@ -719,11 +720,17 @@ class FiberRvePage(QWidget):
         cmd = saved or detect_abaqus_command()
         if cmd:
             return cmd
+        default_dir = "D:/" if os.name == "nt" else "/usr"
+        file_filter = (
+            "Batch / Executable (*.bat *.cmd *.exe);;All Files (*)"
+            if os.name == "nt"
+            else "All Files (*)"
+        )
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "请选择 Abaqus 启动命令（如 abq2026.bat / abaqus.bat）",
-            "D:/",
-            "Batch / Executable (*.bat *.cmd *.exe);;All Files (*)",
+            "请选择 Abaqus 启动命令（如 abq2026.bat / abaqus）",
+            default_dir,
+            file_filter,
         )
         if not path:
             return None

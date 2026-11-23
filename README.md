@@ -59,9 +59,23 @@ uv run --locked pp-rve-rpt-texgen
 uv run --locked pytest
 ~~~
 
-使用 PyInstaller 打包独立单文件可执行程序（输出至 `dist\材料多尺度建模处理工具箱.exe`）：
+### Windows 打包
 
 ~~~powershell
 Set-Location 'D:\1_sdu\pp_树脂牌号计算工具\pp_rve_rpt_texgen'
 .\packaging\build_exe.ps1
 ~~~
+
+### Linux (x86_64) 打包与运行
+
+在 Linux 桌面或 WSL2 环境下执行：
+
+~~~bash
+bash packaging/build_linux.sh
+~~~
+
+打包输出：
+- `dist/multiscale-toolbox-linux-x86_64.tar.gz`（含单文件可执行程序 `multiscale-toolbox`、应用图标 `app_icon.png`、桌面图标注册脚本 `install_desktop.sh` 与使用说明）
+- `dist/linux/multiscale-toolbox`
+
+解压后可直接运行 `./multiscale-toolbox`，如需添加应用菜单及状态栏/Dock 图标可执行 `./install_desktop.sh`。

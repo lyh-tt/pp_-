@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent
+IS_WIN = sys.platform == "win32"
+ICON_PNG = PROJECT_ROOT / "src" / "multiscale" / "ui" / "assets" / "app_icon.png"
+ICON_ICO = PROJECT_ROOT / "src" / "multiscale" / "ui" / "assets" / "app_icon.ico"
 
 datas = [
     (str(PROJECT_ROOT / "src" / "multiscale" / "fiber" / "templates" / "fiber_post.py.tpl"), "multiscale/fiber/templates"),
@@ -10,6 +14,8 @@ datas = [
     (str(PROJECT_ROOT / "src" / "multiscale" / "abaqus" / "templates" / "rve_post.py.tpl"), "multiscale/abaqus/templates"),
     (str(PROJECT_ROOT / "src" / "multiscale" / "abaqus" / "templates" / "abaqus_runner.py.tpl"), "multiscale/abaqus/templates"),
     (str(PROJECT_ROOT / "src" / "multiscale" / "ui" / "theme.qss"), "multiscale/ui"),
+    (str(ICON_PNG), "multiscale/ui/assets"),
+    (str(ICON_ICO), "multiscale/ui/assets"),
     (str(PROJECT_ROOT / "templates" / "fiber"), "templates/fiber"),
     (str(PROJECT_ROOT / "examples" / "resin_inputs_example.csv"), "examples"),
 ]
@@ -34,7 +40,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="材料多尺度建模处理工具箱",
+    name="材料多尺度建模处理工具箱" if IS_WIN else "multiscale-toolbox",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -47,4 +53,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ICON_ICO) if IS_WIN else None,
 )

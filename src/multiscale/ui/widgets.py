@@ -1,6 +1,8 @@
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -9,6 +11,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..common.resources import package_resource
+
+
+def load_app_icon() -> QIcon:
+    """加载应用抽象几何图标：Windows 优先多分辨率 ICO 并补充 PNG，其他平台加载 PNG。"""
+    icon = QIcon()
+    if sys.platform == "win32":
+        ico_path = package_resource("ui/assets/app_icon.ico")
+        if ico_path.is_file():
+            icon.addFile(str(ico_path))
+    png_path = package_resource("ui/assets/app_icon.png")
+    if png_path.is_file():
+        icon.addFile(str(png_path))
+    return icon
 
 
 def label(text: str, role: str = "", *, wrap: bool = False) -> QLabel:

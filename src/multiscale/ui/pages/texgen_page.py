@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSettings, QUrl
@@ -201,13 +203,23 @@ class TexGenPage(QWidget):
             self._notify(f"已复制 {self.script.parent.name} 的脚本路径。")
 
     def _open_texgen(self) -> None:
-        installed = Path("D:/TexGen/TexGenGUI.exe")
-        saved = self.settings.value("texgen_exe", str(installed), type=str)
-        exe = Path(saved)
+        if os.name == "nt":
+            installed = Path("D:/TexGen/TexGenGUI.exe")
+            saved = self.settings.value("texgen_exe", str(installed), type=str)
+            exe = Path(saved)
+            file_filter = "TexGen (TexGenGUI.exe)"
+            title = "选择 TexGenGUI.exe"
+        else:
+            located = shutil.which("TexGenGUI") or shutil.which("texgengui") or ""
+            saved = self.settings.value("texgen_exe", located, type=str)
+            exe = Path(saved) if saved else Path()
+            file_filter = "All Files (*)"
+            title = "选择 TexGen 可执行程序"
+
+        if not saved and os.name != "nt":
+            exe = Path()
         if not exe.is_file():
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择 TexGenGUI.exe", "", "TexGen (TexGenGUI.exe)"
-            )
+            path, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
             if not path:
                 return
             exe = Path(path)
